@@ -61,6 +61,7 @@
 #include "sensors/battery.h"
 
 #include "io/serial.h"
+#include "io/serial_feature_map.h"
 #include "io/gimbal.h"
 #include "io/gps.h"
 #include "io/ledstrip.h"
@@ -70,6 +71,7 @@
 
 #include "rx/rx.h"
 
+#include "flight/flight_plan_nav.h"
 #include "flight/mixer.h"
 #include "flight/pid.h"
 #include "flight/imu.h"
@@ -79,12 +81,11 @@
 #include "telemetry/telemetry.h"
 #include "telemetry/ltm.h"
 
-
 #define TELEMETRY_LTM_INITIAL_PORT_MODE MODE_TX
 #define LTM_CYCLETIME   100
 
 static serialPort_t *ltmPort;
-static const serialPortConfig_t *portConfig;
+static serialPortIdentifier_e telemetryPort = SERIAL_PORT_NONE;
 static bool ltmEnabled;
 static portSharing_e ltmPortSharing;
 static uint8_t ltm_crc;
@@ -137,7 +138,7 @@ static void ltm_gframe(void)
 
     if (!STATE(GPS_FIX))
         gps_fix_type = 1;
-    else if (gpsSol.numSat < 5)
+    else if (gpsSol.numSat < GPS_MIN_SAT_COUNT)
         gps_fix_type = 2;
     else
         gps_fix_type = 3;
@@ -176,6 +177,12 @@ static void ltm_sframe(void)
         lt_flightmode = 2;
     else if (FLIGHT_MODE(HORIZON_MODE))
         lt_flightmode = 3;
+    else if (FLIGHT_MODE(GPS_RESCUE_MODE) || flightPlanNavIsRescuePlanActive())
+        lt_flightmode = 13;
+    else if (FLIGHT_MODE(POS_HOLD_MODE))
+        lt_flightmode = 9;
+    else if (FLIGHT_MODE(ALT_HOLD_MODE))
+        lt_flightmode = 8;
     else
         lt_flightmode = 1;      // Rate mode
 
@@ -213,8 +220,8 @@ static void ltm_oframe(void)
 {
     ltm_initialise_packet('O');
 #if defined(USE_GPS)
-    ltm_serialise_32(GPS_home[GPS_LATITUDE]);
-    ltm_serialise_32(GPS_home[GPS_LONGITUDE]);
+    ltm_serialise_32(GPS_home_llh.lat);
+    ltm_serialise_32(GPS_home_llh.lon);
 #else
     ltm_serialise_32(0);
     ltm_serialise_32(0);
@@ -263,20 +270,20 @@ void freeLtmTelemetryPort(void)
 
 void initLtmTelemetry(void)
 {
-    portConfig = findSerialPortConfig(FUNCTION_TELEMETRY_LTM);
-    ltmPortSharing = determinePortSharing(portConfig, FUNCTION_TELEMETRY_LTM);
+    telemetryPort = telemetryProviderPort(TELEMETRY_PROTOCOL_LTM);
+    ltmPortSharing = determinePortSharing(telemetryPort, FUNCTION_TELEMETRY_LTM);
 }
 
 void configureLtmTelemetryPort(void)
 {
-    if (!portConfig) {
+    if (telemetryPort == SERIAL_PORT_NONE) {
         return;
     }
-    baudRate_e baudRateIndex = portConfig->telemetry_baudrateIndex;
+    baudRate_e baudRateIndex = telemetryProviderBaud(TELEMETRY_PROTOCOL_LTM, telemetryPort);
     if (baudRateIndex == BAUD_AUTO) {
         baudRateIndex = BAUD_19200;
     }
-    ltmPort = openSerialPort(portConfig->identifier, FUNCTION_TELEMETRY_LTM, NULL, NULL, baudRates[baudRateIndex], TELEMETRY_LTM_INITIAL_PORT_MODE, telemetryConfig()->telemetry_inverted ? SERIAL_INVERTED : SERIAL_NOT_INVERTED);
+    ltmPort = openSerialPort(telemetryPort, FUNCTION_TELEMETRY_LTM, NULL, NULL, baudRates[baudRateIndex], TELEMETRY_LTM_INITIAL_PORT_MODE, telemetryConfig()->telemetry_inverted ? SERIAL_INVERTED : SERIAL_NOT_INVERTED);
     if (!ltmPort)
         return;
     ltmEnabled = true;
@@ -284,7 +291,7 @@ void configureLtmTelemetryPort(void)
 
 void checkLtmTelemetryState(void)
 {
-    if (portConfig && telemetryCheckRxPortShared(portConfig, rxRuntimeState.serialrxProvider)) {
+    if (telemetryPort != SERIAL_PORT_NONE && telemetryCheckRxPortShared(telemetryPort, rxRuntimeState.serialrxProvider)) {
         if (!ltmEnabled && telemetrySharedPort != NULL) {
             ltmPort = telemetrySharedPort;
             ltmEnabled = true;

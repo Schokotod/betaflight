@@ -18,6 +18,7 @@
 #pragma once
 
 #include <string.h>
+#include <stdarg.h>
 
 extern "C" {
     #include "drivers/display.h"
@@ -33,6 +34,8 @@ void displayPortTestBufferSubstring(int x, int y, const char * expectedFormat, .
 #define UNITTEST_DISPLAYPORT_BUFFER_LEN (UNITTEST_DISPLAYPORT_ROWS * UNITTEST_DISPLAYPORT_COLS)
 
 char testDisplayPortBuffer[UNITTEST_DISPLAYPORT_BUFFER_LEN];
+
+uint8_t testDisplayPortAttrBuffer[UNITTEST_DISPLAYPORT_BUFFER_LEN];
 
 static displayPort_t testDisplayPort;
 
@@ -53,6 +56,7 @@ static int displayPortTestClearScreen(displayPort_t *displayPort, displayClearOp
     UNUSED(displayPort);
     UNUSED(options);
     memset(testDisplayPortBuffer, ' ', UNITTEST_DISPLAYPORT_BUFFER_LEN);
+    memset(testDisplayPortAttrBuffer, 0, UNITTEST_DISPLAYPORT_BUFFER_LEN);
     return 0;
 }
 
@@ -71,9 +75,10 @@ static int displayPortTestScreenSize(const displayPort_t *displayPort)
 static int displayPortTestWriteString(displayPort_t *displayPort, uint8_t x, uint8_t y, uint8_t attr, const char *s)
 {
     UNUSED(displayPort);
-    UNUSED(attr);
     for (unsigned int i = 0; i < strlen(s); i++) {
-        testDisplayPortBuffer[(y * UNITTEST_DISPLAYPORT_COLS) + x + i] = s[i];
+        const size_t idx = (y * UNITTEST_DISPLAYPORT_COLS) + x + i;
+        testDisplayPortBuffer[idx] = s[i];
+        testDisplayPortAttrBuffer[idx] = attr;
     }
     return 0;
 }
@@ -81,8 +86,9 @@ static int displayPortTestWriteString(displayPort_t *displayPort, uint8_t x, uin
 static int displayPortTestWriteChar(displayPort_t *displayPort, uint8_t x, uint8_t y, uint8_t attr, uint8_t c)
 {
     UNUSED(displayPort);
-    UNUSED(attr);
-    testDisplayPortBuffer[(y * UNITTEST_DISPLAYPORT_COLS) + x] = c;
+    const size_t idx = (y * UNITTEST_DISPLAYPORT_COLS) + x;
+    testDisplayPortBuffer[idx] = c;
+    testDisplayPortAttrBuffer[idx] = attr;
     return 0;
 }
 
@@ -103,6 +109,15 @@ static void displayPortTestRedraw(displayPort_t *displayPort)
     UNUSED(displayPort);
 }
 
+static int displayportWriteSys(displayPort_t *displayPort, uint8_t x, uint8_t y, displayPortSystemElement_e systemElement)
+{
+    UNUSED(displayPort);
+    UNUSED(x);
+    UNUSED(y);
+    UNUSED(systemElement);
+    return 0;
+}
+
 static uint32_t displayPortTestTxBytesFree(const displayPort_t *displayPort)
 {
     UNUSED(displayPort);
@@ -115,12 +130,27 @@ static const displayPortVTable_t testDisplayPortVTable = {
     .clearScreen = displayPortTestClearScreen,
     .drawScreen = displayPortTestDrawScreen,
     .screenSize = displayPortTestScreenSize,
+    .writeSys = displayportWriteSys,
     .writeString = displayPortTestWriteString,
     .writeChar = displayPortTestWriteChar,
     .isTransferInProgress = displayPortTestIsTransferInProgress,
     .heartbeat = displayPortTestHeartbeat,
     .redraw = displayPortTestRedraw,
-    .txBytesFree = displayPortTestTxBytesFree
+    .isSynced = displayPortTestIsTransferInProgress,
+    .txBytesFree = displayPortTestTxBytesFree,
+    .layerSupported = NULL,
+    .layerSelect = NULL,
+    .layerCopy = NULL,
+    .writeFontCharacter = NULL,
+    .checkReady = NULL,
+    .beginTransaction = NULL,
+    .commitTransaction = NULL,
+    .getCanvas = NULL,
+    .setBackgroundType = NULL,
+    .drawOsdItem = NULL,
+    .redrawBackground = NULL,
+    .fontUpdateCompletion = NULL,
+    .writeLogo = NULL,
 };
 
 displayPort_t *displayPortTestInit(void)
@@ -171,4 +201,21 @@ void displayPortTestBufferSubstring(int x, int y, const char * expectedFormat, .
     for (size_t i = 0; i < strlen(expected); i++) {
         EXPECT_EQ(expected[i], testDisplayPortBuffer[(y * testDisplayPort.cols) + x + i]);
     }
+}
+
+void displayPortTestBufferAttr(int x, int y, uint8_t expectedAttr)
+{
+    EXPECT_EQ(expectedAttr, testDisplayPortAttrBuffer[(y * testDisplayPort.cols) + x]);
+}
+
+void displayPortTestBufferAttrBits(int x, int y, uint8_t expectedBits)
+{
+    const uint8_t attr = testDisplayPortAttrBuffer[(y * testDisplayPort.cols) + x];
+    EXPECT_EQ(expectedBits, attr & expectedBits);
+}
+
+void displayPortTestBufferAttrNoBits(int x, int y, uint8_t unexpectedBits)
+{
+    const uint8_t attr = testDisplayPortAttrBuffer[(y * testDisplayPort.cols) + x];
+    EXPECT_EQ(0, attr & unexpectedBits);
 }

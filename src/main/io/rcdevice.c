@@ -48,7 +48,6 @@ typedef enum {
     RCDEVICE_STATE_WAITING_CRC,
 } RCDEVICE_PARSER_STATE;
 
-
 typedef struct {
     uint8_t state;
     uint8_t expectedDataLength;
@@ -86,7 +85,7 @@ static uint8_t runcamDeviceGetRespLen(uint8_t command)
     return 0;
 }
 
-static bool rcdeviceRespCtxQueuePush(rcdeviceWaitingResponseQueue *queue, rcdeviceResponseParseContext_t *respCtx)
+static bool rcdeviceRespCtxQueuePush(rcdeviceWaitingResponseQueue *queue, const rcdeviceResponseParseContext_t *respCtx)
 {
     if (queue == NULL || (queue->itemCount + 1) > MAX_WAITING_RESPONSES) {
         return false;
@@ -293,10 +292,9 @@ static void runcamDeviceGetDeviceInfo(runcamDevice_t *device)
 void runcamDeviceInit(runcamDevice_t *device)
 {
     device->isReady = false;
-    serialPortFunction_e portID = FUNCTION_RCDEVICE;
-    const serialPortConfig_t *portConfig = findSerialPortConfig(portID);
-    if (portConfig != NULL) {
-        device->serialPort = openSerialPort(portConfig->identifier, portID, NULL, NULL, 115200, MODE_RXTX, SERIAL_NOT_INVERTED);
+    const serialPortIdentifier_e port = rcdeviceConfig()->rcdevice_uart;
+    if (port != SERIAL_PORT_NONE) {
+        device->serialPort = openSerialPort(port, FUNCTION_RCDEVICE, NULL, NULL, 115200, MODE_RXTX, SERIAL_NOT_INVERTED);
         device->info.protocolVersion = rcdeviceConfig()->protocolVersion;
         if (device->serialPort != NULL) {
             runcamDeviceGetDeviceInfo(device);
@@ -382,7 +380,7 @@ static rcdeviceResponseParseContext_t* getWaitingResponse(timeMs_t currentTimeMs
     return respCtx;
 }
 
-runcamDeviceRequest_t* rcdeviceGetRequest()
+runcamDeviceRequest_t* rcdeviceGetRequest(void)
 {
     if (requestParserContext.isParseDone) {
         // reset the parse done state, then we can handle next request from rcdevice
@@ -457,7 +455,7 @@ void rcdeviceReceive(timeUs_t currentTimeUs)
             break;
         }
 
-        // if it is during the packet receiving progress, check if it is already timeout(200 ms), 
+        // if it is during the packet receiving progress, check if it is already timeout(200 ms),
         // if timeout, then reset the state, else the later requests can't  be accept
         if (requestParserContext.state != RCDEVICE_STATE_WAITING_HEADER && millis() - requestParserContext.lastRecvDataTimestamp > 200) {
             memset(&requestParserContext, 0, sizeof(runcamDeviceRequestParseContext_t));
@@ -475,7 +473,7 @@ void rcdeviceReceive(timeUs_t currentTimeUs)
             case RCDEVICE_STATE_WAITING_COMMAND:
                 requestParserContext.request.command = c;
                 // there is no payload for RCDEVICE_PROTOCOL_COMMAND_REQUEST_FC_ATTITUDE, skip to waiting crc step
-                if (requestParserContext.request.command == RCDEVICE_PROTOCOL_COMMAND_REQUEST_FC_ATTITUDE) { 
+                if (requestParserContext.request.command == RCDEVICE_PROTOCOL_COMMAND_REQUEST_FC_ATTITUDE) {
                     requestParserContext.state = RCDEVICE_STATE_WAITING_CRC;
                 } else {
                     // for now, only RCDEVICE_PROTOCOL_COMMAND_REQUEST_FC_ATTITUDE support, so reset the state to waiting header.
@@ -487,7 +485,8 @@ void rcdeviceReceive(timeUs_t currentTimeUs)
                 requestParserContext.state = RCDEVICE_STATE_WAITING_DATA;
                 break;
             case RCDEVICE_STATE_WAITING_DATA:
-                if (requestParserContext.request.dataLength < requestParserContext.expectedDataLength) {
+                if (requestParserContext.request.dataLength < requestParserContext.expectedDataLength &&
+                    requestParserContext.request.dataLength < (RCDEVICE_PROTOCOL_MAX_DATA_SIZE - 1)) {
                     requestParserContext.request.data[requestParserContext.request.dataLength] = c;
                     requestParserContext.request.dataLength++;
                 }

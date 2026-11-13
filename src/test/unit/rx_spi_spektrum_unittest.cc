@@ -85,7 +85,7 @@ extern "C" {
     } dsmReceiver_t;
 
     extern dsmReceiver_t dsmReceiver;
-    extern bool isError = false;
+    bool isError = false;
 
     static const dsmReceiver_t empty = dsmReceiver_t();
     static rxRuntimeState_t config = rxRuntimeState_t();
@@ -135,7 +135,15 @@ extern "C" {
     }
 
     static const rxSpiConfig_t injectedConfig = {
-        .extiIoTag = IO_TAG(PA0),
+        .rx_spi_protocol = 0,
+        .rx_spi_id = 0,
+        .rx_spi_rf_channel_count = 0,
+        .csnTag = IO_TAG_NONE,
+        .spibus = 0,
+        .bindIoTag = IO_TAG_NONE,
+        .ledIoTag = IO_TAG_NONE,
+        .ledInversion = 0,
+        .extiIoTag = IO_TAG_NONE,
     };
 }
 

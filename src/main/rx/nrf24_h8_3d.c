@@ -44,14 +44,12 @@
 #include "rx/rx_spi.h"
 #include "rx/nrf24_h8_3d.h"
 
-
 /*
  * Deviation transmitter sends 345 bind packets, then starts sending data packets.
  * Packets are send at rate of at least one every 4 milliseconds, ie at least 250Hz.
  * This means binding phase lasts 1.4 seconds, the transmitter then enters the data phase.
  * Other transmitters may vary but should have similar characteristics.
  */
-
 
 /*
  * H8_3D Protocol
@@ -131,8 +129,6 @@ STATIC_UNIT_TESTED bool h8_3dCheckBindPacket(const uint8_t *payload)
 
 STATIC_UNIT_TESTED uint16_t h8_3dConvertToPwm(uint8_t val, int16_t _min, int16_t _max)
 {
-#define PWM_RANGE (PWM_RANGE_MAX - PWM_RANGE_MIN)
-
     int32_t ret = val;
     const int32_t range = _max - _min;
     ret = PWM_RANGE_MIN + ((ret - _min) * PWM_RANGE)/range;

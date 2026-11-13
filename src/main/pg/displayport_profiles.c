@@ -30,11 +30,13 @@
 
 #if defined(USE_MSP_DISPLAYPORT)
 
-PG_REGISTER_WITH_RESET_FN(displayPortProfile_t, displayPortProfileMsp, PG_DISPLAY_PORT_MSP_CONFIG, 0);
+PG_REGISTER_WITH_RESET_FN(displayPortProfile_t, displayPortProfileMsp, PG_DISPLAY_PORT_MSP_CONFIG, 1);
 
 void pgResetFn_displayPortProfileMsp(displayPortProfile_t *displayPortProfile)
 {
-    displayPortProfile->displayPortSerial = SERIAL_PORT_NONE;
+    for (uint8_t font = 0; font < DISPLAYPORT_SEVERITY_COUNT; font++) {
+        displayPortProfile->fontSelection[font] = font;
+    }
 }
 
 #endif
@@ -52,6 +54,24 @@ void pgResetFn_displayPortProfileMax7456(displayPortProfile_t *displayPortProfil
     displayPortProfile->invert = false;
     displayPortProfile->blackBrightness = 0;
     displayPortProfile->whiteBrightness = 2;
+}
+
+#endif
+
+#if ENABLE_FB_OSD
+
+PG_REGISTER_WITH_RESET_FN(displayPortProfile_t, displayPortProfileFbOsd, PG_DISPLAY_PORT_FBOSD_CONFIG, 1);
+
+void pgResetFn_displayPortProfileFbOsd(displayPortProfile_t *displayPortProfile)
+{
+    // TODO add entries in settings.c, so we can set from Configurator / CLI.
+    displayPortProfile->colAdjust = 0;
+    displayPortProfile->rowAdjust = 0;
+    displayPortProfile->invert = false;
+    displayPortProfile->blackBrightness = 0;
+    displayPortProfile->whiteBrightness = 0;
+    // font selection
+    // use device blink
 }
 
 #endif

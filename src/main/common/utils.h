@@ -58,11 +58,35 @@
 #define UNUSED(x) (void)(x) // Variables and parameters that are not used
 #endif
 
+#define MAYBE_UNUSED __attribute__ ((unused))
+#define LOCAL_UNUSED_FUNCTION __attribute__ ((unused, deprecated ("function is marked as LOCAL_UNUSED_FUNCTION")))
+
+/* Mark a char buffer/pointer as not necessarily NUL-terminated. */
+#ifndef NONSTRING
+        /* Fallback for compilers without __has_attribute. */
+#  ifndef __has_attribute
+#    define __has_attribute(x) 0
+#  endif
+
+#  if __has_attribute(nonstring) || (defined(__GNUC__) && __GNUC__ >= 8)
+#    define NONSTRING __attribute__((__nonstring__))
+#  else
+#    define NONSTRING
+#  endif
+#endif
+
 #define DISCARD(x) (void)(x) // To explicitly ignore result of x (usually an I/O register access).
 
+#ifndef __cplusplus
 #define STATIC_ASSERT(condition, name) _Static_assert((condition), #name)
+#else
+// since C++11
+#define STATIC_ASSERT(condition, name) static_assert((condition), #name)
+#endif
 
-
+#ifdef BIT
+#undef BIT
+#endif
 #define BIT(x) (1 << (x))
 
 /*
@@ -71,6 +95,9 @@ http://resnet.uoregon.edu/~gurney_j/jmpc/bitwise.html
 #define BITCOUNT(x) (((BX_(x)+(BX_(x)>>4)) & 0x0F0F0F0F) % 255)
 #define BX_(x) ((x) - (((x)>>1)&0x77777777) - (((x)>>2)&0x33333333) - (((x)>>3)&0x11111111))
 
+static inline int popcount(unsigned x) { return __builtin_popcount(x); }
+static inline int popcount32(uint32_t x) { return __builtin_popcount(x); }
+static inline int popcount64(uint64_t x) { return __builtin_popcountll(x); }
 
 /*
  * https://groups.google.com/forum/?hl=en#!msg/comp.lang.c/attFnqwhvGk/sGBKXvIkY3AJ
@@ -89,20 +116,22 @@ http://resnet.uoregon.edu/~gurney_j/jmpc/bitwise.html
 #if 0
 // ISO C version, but no type checking
 #define container_of(ptr, type, member) \
-                      ((type *) ((char *)(ptr) - offsetof(type, member)))
+                      ((type *)(void *) ((char *)(ptr) - offsetof(type, member)))
 #else
 // non ISO variant from linux kernel; checks ptr type, but triggers 'ISO C forbids braced-groups within expressions [-Wpedantic]'
 //  __extension__ is here to disable this warning
 #define container_of(ptr, type, member)  ( __extension__ ({     \
         const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
-        (type *)( (char *)__mptr - offsetof(type,member) );}))
+        (type *)(void *)( (char *)__mptr - offsetof(type,member) );}))
 
 static inline int16_t cmp16(uint16_t a, uint16_t b) { return (int16_t)(a-b); }
 static inline int32_t cmp32(uint32_t a, uint32_t b) { return (int32_t)(a-b); }
 
+static inline uint32_t llog2(uint32_t n) { return 31 - __builtin_clz(n | 1); }
+
 // using memcpy_fn will force memcpy function call, instead of inlining it. In most cases function call takes fewer instructions
 //  than inlined version (inlining is cheaper for very small moves < 8 bytes / 2 store instructions)
-#if defined(UNIT_TEST) || defined(SIMULATOR_BUILD)
+#if defined(UNIT_TEST) || ENABLE_SIMULATOR
 // Call memcpy when building unittest - this is easier that asm symbol name mangling (symbols start with _underscore on win32)
 #include <string.h>
 static inline void  memcpy_fn ( void * destination, const void * source, size_t num ) { memcpy(destination, source, num); }
@@ -110,11 +139,10 @@ static inline void  memcpy_fn ( void * destination, const void * source, size_t 
 void * memcpy_fn ( void * destination, const void * source, size_t num ) asm("memcpy");
 #endif
 
-
 #endif
 
 #if __GNUC__ > 6
-#define FALLTHROUGH __attribute__ ((fallthrough))
+#define FALLTHROUGH ;__attribute__ ((fallthrough))
 #else
 #define FALLTHROUGH do {} while(0)
 #endif

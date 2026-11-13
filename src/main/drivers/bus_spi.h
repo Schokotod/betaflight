@@ -20,31 +20,14 @@
 
 #pragma once
 
+#include "platform.h"
+
 #include "drivers/bus.h"
+#include "drivers/bus_spi_types.h"
 #include "drivers/io_types.h"
-#include "drivers/bus.h"
-#include "drivers/rcc_types.h"
 
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
-
-#if defined(STM32F4) || defined(STM32F3)
-#define SPI_IO_AF_CFG           IO_CONFIG(GPIO_Mode_AF,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_NOPULL)
-#define SPI_IO_AF_SCK_CFG       IO_CONFIG(GPIO_Mode_AF,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_DOWN)
-#define SPI_IO_AF_MISO_CFG      IO_CONFIG(GPIO_Mode_AF,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_UP)
-#define SPI_IO_CS_CFG           IO_CONFIG(GPIO_Mode_OUT, GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_NOPULL)
-#elif defined(STM32F7) || defined(STM32H7) || defined(STM32G4)
-#define SPI_IO_AF_CFG           IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_NOPULL)
-#define SPI_IO_AF_SCK_CFG_HIGH  IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLUP)
-#define SPI_IO_AF_SCK_CFG_LOW   IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLDOWN)
-#define SPI_IO_AF_MISO_CFG      IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLUP)
-#define SPI_IO_CS_CFG           IO_CONFIG(GPIO_MODE_OUTPUT_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_NOPULL)
-#elif defined(STM32F1)
-#define SPI_IO_AF_SCK_CFG       IO_CONFIG(GPIO_Mode_AF_PP,       GPIO_Speed_50MHz)
-#define SPI_IO_AF_MOSI_CFG      IO_CONFIG(GPIO_Mode_AF_PP,       GPIO_Speed_50MHz)
-#define SPI_IO_AF_MISO_CFG      IO_CONFIG(GPIO_Mode_IN_FLOATING, GPIO_Speed_50MHz)
-#define SPI_IO_CS_CFG           IO_CONFIG(GPIO_Mode_Out_PP,      GPIO_Speed_50MHz)
-#endif
 
 // De facto standard mode
 // See https://en.wikipedia.org/wiki/Serial_Peripheral_Interface
@@ -61,54 +44,35 @@ typedef enum {
     SPI_MODE3_POL_HIGH_EDGE_2ND
 } SPIMode_e;
 
-typedef enum SPIDevice {
+typedef enum {
     SPIINVALID = -1,
-    SPIDEV_1   = 0,
+    SPIDEV_FIRST = 0,
+#if defined(USE_SPI_DEVICE_0)
+    SPIDEV_0   = SPIDEV_FIRST,
+    SPIDEV_1,
+#else
+    SPIDEV_1   = SPIDEV_FIRST,
+#endif
     SPIDEV_2,
     SPIDEV_3,
     SPIDEV_4,
     SPIDEV_5,
-    SPIDEV_6
-} SPIDevice;
+    SPIDEV_6,
+    SPIDEV_7
+} spiDevice_e;
 
-#if defined(STM32F1)
-#define SPIDEV_COUNT 2
-#elif defined(STM32F3) || defined(STM32F4)
-#define SPIDEV_COUNT 3
-#elif defined(STM32F7)
-#define SPIDEV_COUNT 4
-#elif defined(STM32H7)
-#define SPIDEV_COUNT 6
-#else
-#define SPIDEV_COUNT 4
-#endif
-
-// Macros to convert between CLI bus number and SPIDevice.
+// Macros to convert between CLI bus number and spiDevice_e.
 #define SPI_CFG_TO_DEV(x)   ((x) - 1)
 #define SPI_DEV_TO_CFG(x)   ((x) + 1)
 
-// Work around different check routines in the libraries for different MCU types
-#if defined(STM32H7)
-#define CHECK_SPI_RX_DATA_AVAILABLE(instance) LL_SPI_IsActiveFlag_RXWNE(instance)
-#define SPI_RX_DATA_REGISTER(base) ((base)->RXDR)
-#else
-#define CHECK_SPI_RX_DATA_AVAILABLE(instance) LL_SPI_IsActiveFlag_RXNE(instance)
-#define SPI_RX_DATA_REGISTER(base) ((base)->DR)
-#endif
-
 void spiPreinit(void);
-void spiPreinitRegister(ioTag_t iotag, uint8_t iocfg, uint8_t init);
-void spiPreinitByIO(IO_t io);
-void spiPreinitByTag(ioTag_t tag);
-
-bool spiInit(SPIDevice device);
+bool spiInit(spiDevice_e device);
 
 // Called after all devices are initialised to enable SPI DMA where streams are available.
-void spiInitBusDMA();
+void spiInitBusDMA(void);
 
-
-SPIDevice spiDeviceByInstance(SPI_TypeDef *instance);
-SPI_TypeDef *spiInstanceByDevice(SPIDevice device);
+spiDevice_e spiDeviceByInstance(const spiResource_t *instance);
+spiResource_t *spiInstanceByDevice(spiDevice_e device);
 
 // BusDevice API
 
@@ -129,8 +93,15 @@ void spiDmaEnable(const extDevice_t *dev, bool enable);
 void spiSequence(const extDevice_t *dev, busSegment_t *segments);
 // Wait for DMA completion
 void spiWait(const extDevice_t *dev);
+// Negate CS if held asserted after a transfer
+void spiRelease(const extDevice_t *dev);
 // Return true if DMA engine is busy
 bool spiIsBusy(const extDevice_t *dev);
+// Abandon the DMA transfer in progress for this device, then start any transfer queued behind it
+void spiAbortTransfer(const extDevice_t *dev);
+
+// Link two segment lists
+void spiLinkSegments(const extDevice_t *dev, busSegment_t *firstSegment, busSegment_t *secondSegment);
 
 /*
  * Routine naming convention is:
@@ -168,8 +139,15 @@ bool spiReadWriteBufRB(const extDevice_t *dev, uint8_t *txData, uint8_t *rxData,
 struct spiPinConfig_s;
 void spiPinConfigure(const struct spiPinConfig_s *pConfig);
 bool spiUseDMA(const extDevice_t *dev);
-bool spiUseMOSI_DMA(const extDevice_t *dev);
+bool spiUseSDO_DMA(const extDevice_t *dev);
 void spiBusDeviceRegister(const extDevice_t *dev);
 uint8_t spiGetRegisteredDeviceCount(void);
+uint16_t spiGetErrorCounter(void);
 uint8_t spiGetExtDeviceCount(const extDevice_t *dev);
 
+// Common code to process linked segments, to be called from spiSequenceStart.
+// DMA path makes use of spiInternalInitStream, spiInternalStartDMA.
+void spiProcessSegmentsDMA(const extDevice_t *dev);
+void spiIrqHandler(const extDevice_t *dev);
+// Polling code calls spiInternalReadWriteBufPolled.
+void spiProcessSegmentsPolled(const extDevice_t *dev);

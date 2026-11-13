@@ -22,8 +22,10 @@
 
 #include "scheduler/scheduler.h"
 
+void tasksInitData(void);
 void tasksInit(void);
+void tasksUpdateModeGatedEnables(void);
 task_t *getTask(unsigned taskId);
 
-bool taskUpdateRxMainInProgress();
+bool taskUpdateRxMainInProgress(void);
 

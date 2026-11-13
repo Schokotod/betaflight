@@ -74,24 +74,47 @@ bool displayIsGrabbed(const displayPort_t *instance)
     return (instance && instance->grabCount > 0);
 }
 
-void displaySetXY(displayPort_t *instance, uint8_t x, uint8_t y)
+int displaySys(displayPort_t *instance, uint8_t x, uint8_t y, displayPortSystemElement_e systemElement)
 {
-    instance->posX = x;
-    instance->posY = y;
+    if (instance->vTable->writeSys) {
+        return instance->vTable->writeSys(instance, x, y, systemElement);
+    }
+
+    return 0;
 }
 
-int displayWrite(displayPort_t *instance, uint8_t x, uint8_t y, uint8_t attr, const char *s)
+bool displayExtended(displayPort_t *instance, uint8_t x, uint8_t y, uint8_t /* osd_items_e */ item, bool isBackground)
 {
-    instance->posX = x + strlen(s);
-    instance->posY = y;
-    return instance->vTable->writeString(instance, x, y, attr, s);
+    if (instance->vTable->drawOsdItem) {
+        return instance->vTable->drawOsdItem(instance, x, y, item, isBackground);
+    }
+
+    return false;
+}
+
+int displayWrite(displayPort_t *instance, uint8_t x, uint8_t y, uint8_t attr, const char *text)
+{
+    if (strlen(text) == 0) {
+        // No point sending a message to do nothing
+        return 0;
+    }
+
+    return instance->vTable->writeString(instance, x, y, attr, text);
 }
 
 int displayWriteChar(displayPort_t *instance, uint8_t x, uint8_t y, uint8_t attr, uint8_t c)
 {
-    instance->posX = x + 1;
-    instance->posY = y;
     return instance->vTable->writeChar(instance, x, y, attr, c);
+}
+
+bool displayWriteLogo(displayPort_t *instance, uint16_t fontOffset, uint16_t fontMax, uint8_t logoCols, uint8_t logoRows)
+{
+    if (instance->vTable->writeLogo) {
+        instance->vTable->writeLogo(instance,fontOffset, fontMax, logoCols,logoRows);
+        return true;
+    }
+
+    return false; // not handled by displayport driver.
 }
 
 bool displayIsTransferInProgress(const displayPort_t *instance)
@@ -154,6 +177,13 @@ bool displayWriteFontCharacter(displayPort_t *instance, uint16_t addr, const osd
     return false;
 }
 
+void displayFontUpdateCompletion(displayPort_t *instance)
+{
+    if (instance->vTable->fontUpdateCompletion) {
+        instance->vTable->fontUpdateCompletion(instance);
+    }
+}
+
 void displaySetBackgroundType(displayPort_t *instance, displayPortBackground_e backgroundType)
 {
     if (instance->vTable->setBackgroundType) {
@@ -205,6 +235,7 @@ bool displaySupportsOsdSymbols(displayPort_t *instance)
 {
     // Assume device types that support OSD display will support the OSD symbols (since the OSD logic will use them)
     if ((instance->deviceType == DISPLAYPORT_DEVICE_TYPE_MAX7456)
+        || (instance->deviceType == DISPLAYPORT_DEVICE_TYPE_FBOSD)
         || (instance->deviceType == DISPLAYPORT_DEVICE_TYPE_MSP)
         || (instance->deviceType == DISPLAYPORT_DEVICE_TYPE_FRSKYOSD)) {
         return true;
@@ -223,4 +254,11 @@ void displayInit(displayPort_t *instance, const displayPortVTable_t *vTable, dis
     displayBeginTransaction(instance, DISPLAY_TRANSACTION_OPT_NONE);
     displayClearScreen(instance, DISPLAY_CLEAR_WAIT);
     displayCommitTransaction(instance);
+}
+
+void displayRedrawBackground(displayPort_t *instance)
+{
+    if (instance->vTable->redrawBackground) {
+        instance->vTable->redrawBackground(instance);
+    }
 }

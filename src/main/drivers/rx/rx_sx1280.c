@@ -37,7 +37,6 @@
 
 #include "drivers/bus_spi.h"
 #include "drivers/io.h"
-#include "drivers/io_impl.h"
 #include "drivers/nvic.h"
 #include "drivers/rx/rx_sx1280.h"
 #include "drivers/rx/rx_spi.h"
@@ -52,9 +51,9 @@
 
 // The following global variables are accessed from interrupt context to process the sequence of steps in packet processing
 // As there is only ever one device, no need to add a device context; globals will do
-static volatile dioReason_e irqReason; // Used to pass irq status from sx1280IrqStatusRead() to sx1280ProcessIrq()
+static dioReasonFlags_e irqReason; // Used to pass irq status from sx1280IrqStatusRead() to sx1280ProcessIrq()
 static volatile uint8_t packetStats[2];
-static volatile uint8_t FIFOaddr; // Used to pass data from sx1280GotFIFOAddr() to sx1280DoReadBuffer()
+static uint8_t FIFOaddr; // Used to pass data from sx1280GotFIFOAddr() to sx1280DoReadBuffer()
 
 static IO_t busy;
 
@@ -66,31 +65,31 @@ static busyIntContext_t busyIntContext;
 
 static volatile timeUs_t sx1280Processing;
 
-static volatile bool pendingISR = false;
 static volatile bool pendingDoFHSS = false;
+static sx1280PacketTypes_e sx1280PacketMode;
 
 #define SX1280_BUSY_TIMEOUT_US 1000
-
 
 bool sx1280IsBusy(void)
 {
     return IORead(busy);
 }
 
-static bool sx1280PollBusy(void)
+FAST_CODE_PREF static bool sx1280PollBusy(void)
 {
     uint32_t startTime = micros();
     while (IORead(busy)) {
         if ((micros() - startTime) > SX1280_BUSY_TIMEOUT_US) {
             return false;
         } else {
-            __asm__("nop");
+            // Ensure a service window exists for interrupts
+            __NOP();
         }
     }
     return true;
 }
 
-static bool sx1280MarkBusy(void)
+FAST_CODE_PREF static bool sx1280MarkBusy(void)
 {
     // Check that there isn't already a sequence of accesses to the SX1280 in progress
     ATOMIC_BLOCK(NVIC_PRIO_MAX) {
@@ -110,7 +109,7 @@ static void sx1280ClearBusyFn(void)
 }
 
 // Switch to waiting for busy interrupt
-static bool sx1280EnableBusy(void)
+FAST_CODE_PREF static bool sx1280EnableBusy(void)
 {
     if (!sx1280MarkBusy()) {
         return false;
@@ -186,7 +185,7 @@ bool sx1280HandleFromTick(void)
             return true;
         }
     }
-    
+
     return false;
 }
 
@@ -220,15 +219,18 @@ bool sx1280Init(IO_t resetPin, IO_t busyPin)
     IOConfigGPIO(resetPin, IOCFG_IN_FLOATING); // leave floating, internal pullup on sx1280 side
     delay(20);
 
-    uint16_t firmwareRev = (((sx1280ReadRegister(REG_LR_FIRMWARE_VERSION_MSB)) << 8) | (sx1280ReadRegister(REG_LR_FIRMWARE_VERSION_MSB + 1)));
-
+    uint16_t firmwareRev = (((sx1280ReadRegister(SX1280_REG_FIRMWARE_VERSION_MSB)) << 8) | (sx1280ReadRegister(SX1280_REG_FIRMWARE_VERSION_MSB + 1)));
     if ((firmwareRev == 0) || (firmwareRev == 65535)) {
         return false;
     }
 
     // Record the dev pointer for callbacks
     extDevice_t *dev = rxSpiGetDevice();
-    dev->callbackArg = (uint32_t)dev;
+    dev->callbackArg = (uintptr_t)dev;
+
+    sx1280SetMode(SX1280_MODE_STDBY_RC);
+    sx1280WriteCommand(SX1280_RADIO_SET_AUTOFS, 0x01);
+    sx1280WriteRegister(SX1280_REG_RX_GAIN_REGIME, sx1280ReadRegister(SX1280_REG_RX_GAIN_REGIME) | 0xC0); //default is low power mode, switch to high sensitivity instead
 
     return true;
 }
@@ -339,31 +341,124 @@ uint8_t sx1280GetStatus(void)
     return buffer[0];
 }
 
-void sx1280ConfigLoraDefaults(void)
+static void sx1280ConfigModParamsLora(const sx1280LoraBandwidths_e bw, const sx1280LoraSpreadingFactors_e sf, const sx1280LoraCodingRates_e cr)
 {
-    sx1280SetMode(SX1280_MODE_STDBY_RC);                                      //step 1 put in STDBY_RC mode
-    sx1280WriteCommand(SX1280_RADIO_SET_PACKETTYPE, SX1280_PACKET_TYPE_LORA); //Step 2: set packet type to LoRa
-    sx1280ConfigLoraModParams(SX1280_LORA_BW_0800, SX1280_LORA_SF6, SX1280_LORA_CR_4_7); //Step 5: Configure Modulation Params
-    sx1280WriteCommand(SX1280_RADIO_SET_AUTOFS, 0x01);                        //enable auto FS
-    sx1280WriteRegister(0x0891, (sx1280ReadRegister(0x0891) | 0xC0));         //default is low power mode, switch to high sensitivity instead
-    sx1280SetPacketParams(12, SX1280_LORA_PACKET_IMPLICIT, 8, SX1280_LORA_CRC_OFF, SX1280_LORA_IQ_NORMAL); //default params
-    sx1280SetFrequencyReg(fhssGetInitialFreq(0));                             //Step 3: Set Freq
-    sx1280SetFifoAddr(0x00, 0x00);                                            //Step 4: Config FIFO addr
-    sx1280SetDioIrqParams(SX1280_IRQ_RADIO_ALL, SX1280_IRQ_TX_DONE | SX1280_IRQ_RX_DONE, SX1280_IRQ_RADIO_NONE, SX1280_IRQ_RADIO_NONE); //set IRQ to both RXdone/TXdone on DIO1
+    uint8_t rfparams[3];
+    rfparams[0] = sf;
+    rfparams[1] = bw;
+    rfparams[2] = cr;
+
+    sx1280WriteCommandBurst(SX1280_RADIO_SET_MODULATIONPARAMS, rfparams, 3);
+
+    switch (sf) {
+    case SX1280_LORA_SF5:
+    case SX1280_LORA_SF6:
+        sx1280WriteRegister(SX1280_REG_SF_ADDITIONAL_CONFIG, 0x1E); // SF5 or SF6
+        break;
+    case SX1280_LORA_SF7:
+    case SX1280_LORA_SF8:
+        sx1280WriteRegister(SX1280_REG_SF_ADDITIONAL_CONFIG, 0x37); // SF7 or SF8
+        break;
+    default:
+        sx1280WriteRegister(SX1280_REG_SF_ADDITIONAL_CONFIG, 0x32); // SF9, SF10, SF11, SF12
+    }
 }
 
-void sx1280Config(const sx1280LoraBandwidths_e bw, const sx1280LoraSpreadingFactors_e sf, const sx1280LoraCodingRates_e cr, 
-                  const uint32_t freq, const uint8_t preambleLength, const bool iqInverted)
+static void sx1280SetPacketParamsLora(const uint8_t preambleLength, const sx1280LoraPacketLengthsModes_e headerType, const uint8_t payloadLength,
+    const sx1280LoraCrcModes_e crc, const bool invertIQ)
 {
-    sx1280SetMode(SX1280_MODE_SLEEP);
-    sx1280PollBusy();
+    uint8_t buf[7];
+    buf[0] = preambleLength;
+    buf[1] = headerType;
+    buf[2] = payloadLength;
+    buf[3] = crc;
+    buf[4] = invertIQ ? SX1280_LORA_IQ_INVERTED : SX1280_LORA_IQ_NORMAL;
+    buf[5] = 0x00;
+    buf[6] = 0x00;
 
-    sx1280ConfigLoraDefaults();
+    sx1280WriteCommandBurst(SX1280_RADIO_SET_PACKETPARAMS, buf, 7);
+}
+
+static void sx1280ConfigModParamsFlrc(const SX1280_RadioFlrcBandwidths_t bw, const SX1280_RadioFlrcCodingRates_t cr, const SX1280_RadioFlrcGaussianFilter_t bt)
+{
+    uint8_t rfparams[3];
+    rfparams[0] = bw;
+    rfparams[1] = cr;
+    rfparams[2] = bt;
+
+    sx1280WriteCommandBurst(SX1280_RADIO_SET_MODULATIONPARAMS, rfparams, 3);
+}
+
+static void sx1280SetPacketParamsFlrc(uint8_t PreambleLength, uint8_t HeaderType,
+    uint8_t PayloadLength, uint32_t syncWord, uint16_t crcSeed, uint8_t cr)
+{
+    if (PreambleLength < 8)
+        PreambleLength = 8;
+
+    uint8_t buf[7];
+    buf[0] = ((PreambleLength / 4) - 1) << 4;   // AGCPreambleLength
+    buf[1] = SX1280_FLRC_SYNC_WORD_LEN_P32S;    // SyncWordLength
+    buf[2] = SX1280_FLRC_RX_MATCH_SYNC_WORD_1;  // SyncWordMatch
+    buf[3] = HeaderType;                        // PacketType
+    buf[4] = PayloadLength;                     // PayloadLength
+    buf[5] = SX1280_FLRC_CRC_3_BYTE;            // CrcLength
+    buf[6] = SX1280_FLRC_WHITENING_DISABLE;     // Must be whitening disabled
+    sx1280WriteCommandBurst(SX1280_RADIO_SET_PACKETPARAMS, buf, 7);
+
+    // CRC seed (use dedicated cipher)
+    buf[0] = (uint8_t)(crcSeed >> 8);
+    buf[1] = (uint8_t)crcSeed;
+    sx1280WriteRegisterBurst(SX1280_REG_FLRC_CRC_SEED, buf, 2);
+
+    // Set SyncWord1
+    buf[0] = (uint8_t)(syncWord >> 24);
+    buf[1] = (uint8_t)(syncWord >> 16);
+    buf[2] = (uint8_t)(syncWord >> 8);
+    buf[3] = (uint8_t)syncWord;
+
+    // DS_SX1280-1_V3.2.pdf - 16.4 FLRC Modem: Increased PER in FLRC Packets with Synch Word
+    if (((cr == SX1280_FLRC_CR_1_2) || (cr == SX1280_FLRC_CR_3_4)) &&
+        ((buf[0] == 0x8C && buf[1] == 0x38) || (buf[0] == 0x63 && buf[1] == 0x0E))) {
+        uint8_t temp = buf[0];
+        buf[0] = buf[1];
+        buf[1] = temp;
+        // For SX1280_FLRC_CR_3_4 the datasheet also says
+        // "In addition to this the two LSB values XX XX must not be in the range 0x0000 to 0x3EFF"
+        if (cr == SX1280_FLRC_CR_3_4 && buf[3] <= 0x3e)
+            buf[3] |= 0x80; // 0x80 or 0x40 would work
+    }
+
+    sx1280WriteRegisterBurst(SX1280_REG_FLRC_SYNC_WORD, buf, 4);
+
+    // Set permissible sync errors = 0
+    sx1280WriteRegister(SX1280_REG_FLRC_SYNC_ADDR_CTRL, sx1280ReadRegister(SX1280_REG_FLRC_SYNC_ADDR_CTRL) & 0xf0);
+}
+
+void sx1280Config(const uint8_t bw, const uint8_t sfbt, const uint8_t cr,
+    const uint32_t freq, const uint8_t preambleLength, const bool iqInverted,
+    const uint32_t flrcSyncWord, const uint16_t flrcCrcSeed, const bool isFlrc)
+{
+    sx1280SetMode(SX1280_MODE_STDBY_RC);
+
+    sx1280PacketMode = (isFlrc) ? SX1280_PACKET_TYPE_FLRC : SX1280_PACKET_TYPE_LORA;
+    sx1280WriteCommand(SX1280_RADIO_SET_PACKETTYPE, sx1280PacketMode);
+
+    if (isFlrc) {
+        sx1280ConfigModParamsFlrc(bw, cr, sfbt);
+        sx1280SetPacketParamsFlrc(preambleLength, SX1280_FLRC_PACKET_FIXED_LENGTH, 8, flrcSyncWord, flrcCrcSeed, cr);
+    } else {
+        sx1280ConfigModParamsLora(bw, sfbt, cr);
+        sx1280SetPacketParamsLora(preambleLength, SX1280_LORA_PACKET_FIXED_LENGTH, 8, SX1280_LORA_CRC_OFF, iqInverted);
+    }
+
+    sx1280SetDioIrqParams(
+        SX1280_IRQ_TX_DONE | SX1280_IRQ_RX_DONE | SX1280_IRQ_SYNCWORD_VALID | SX1280_IRQ_SYNCWORD_ERROR | SX1280_IRQ_CRC_ERROR, // irqMask
+        SX1280_IRQ_TX_DONE | SX1280_IRQ_RX_DONE, // dio1Mask
+        SX1280_IRQ_RADIO_NONE,
+        SX1280_IRQ_RADIO_NONE
+    );
+
     sx1280SetOutputPower(13); //default is max power (12.5dBm for SX1280 RX)
-    sx1280SetMode(SX1280_MODE_STDBY_XOSC); 
-    sx1280ClearIrqStatus(SX1280_IRQ_RADIO_ALL);
-    sx1280ConfigLoraModParams(bw, sf, cr);
-    sx1280SetPacketParams(preambleLength, SX1280_LORA_PACKET_IMPLICIT, 8, SX1280_LORA_CRC_OFF, (sx1280LoraIqModes_e)((uint8_t)!iqInverted << 6)); // TODO don't make static etc.
     sx1280SetFrequencyReg(freq);
 }
 
@@ -373,22 +468,6 @@ void sx1280SetOutputPower(const int8_t power)
     buf[0] = power + 18;
     buf[1] = (uint8_t) SX1280_RADIO_RAMP_04_US;
     sx1280WriteCommandBurst(SX1280_RADIO_SET_TXPARAMS, buf, 2);
-}
-
-void sx1280SetPacketParams(const uint8_t preambleLength, const sx1280LoraPacketLengthsModes_e headerType, const uint8_t payloadLength, 
-                           const sx1280LoraCrcModes_e crc, const sx1280LoraIqModes_e invertIQ)
-{
-    uint8_t buf[7];
-
-    buf[0] = preambleLength;
-    buf[1] = headerType;
-    buf[2] = payloadLength;
-    buf[3] = crc;
-    buf[4] = invertIQ;
-    buf[5] = 0x00;
-    buf[6] = 0x00;
-
-    sx1280WriteCommandBurst(SX1280_RADIO_SET_PACKETPARAMS, buf, 7);
 }
 
 void sx1280SetMode(const sx1280OperatingModes_e opMode)
@@ -423,37 +502,9 @@ void sx1280SetMode(const sx1280OperatingModes_e opMode)
         buf[2] = 0xFF; // TODO dynamic timeout based on expected onairtime
         sx1280WriteCommandBurst(SX1280_RADIO_SET_TX, buf, 3);
         break;
-    case SX1280_MODE_CAD:
-        break;
+    case SX1280_MODE_CAD: // not implemented yet
     default:
         break;
-    }
-}
-
-void sx1280ConfigLoraModParams(const sx1280LoraBandwidths_e bw, const sx1280LoraSpreadingFactors_e sf, const sx1280LoraCodingRates_e cr)
-{
-    // Care must therefore be taken to ensure that modulation parameters are set using the command
-    // SetModulationParam() only after defining the packet type SetPacketType() to be used
-
-    uint8_t rfparams[3] = {0};
-
-    rfparams[0] = (uint8_t)sf;
-    rfparams[1] = (uint8_t)bw;
-    rfparams[2] = (uint8_t)cr;
-
-    sx1280WriteCommandBurst(SX1280_RADIO_SET_MODULATIONPARAMS, rfparams, 3);
-
-    switch (sf) {
-    case SX1280_LORA_SF5:
-    case SX1280_LORA_SF6:
-        sx1280WriteRegister(0x925, 0x1E); // for SF5 or SF6
-        break;
-    case SX1280_LORA_SF7:
-    case SX1280_LORA_SF8:
-        sx1280WriteRegister(0x925, 0x37); // for SF7 or SF8
-        break;
-    default:
-        sx1280WriteRegister(0x925, 0x32); // for SF9, SF10, SF11, SF12
     }
 }
 
@@ -468,9 +519,8 @@ void sx1280SetFrequencyReg(const uint32_t freqReg)
     sx1280WriteCommandBurst(SX1280_RADIO_SET_RFFREQUENCY, buf, 3);
 }
 
-void sx1280AdjustFrequency(int32_t offset, const uint32_t freq)
+void sx1280AdjustFrequency(int32_t *offset, const uint32_t freq)
 {
-    // just a stub to show that frequency adjustment is not used on this chip as opposed to sx127x
     UNUSED(offset);
     UNUSED(freq);
 }
@@ -529,13 +579,19 @@ void sx1280StartReceiving(void)
 
 void sx1280GetLastPacketStats(int8_t *rssi, int8_t *snr)
 {
-    *rssi = -(int8_t)(packetStats[0] / 2);
-    *snr = ((int8_t) packetStats[1]) / 4;
-    int8_t negOffset = (*snr < 0) ? *snr : 0;
-    *rssi += negOffset;
+    if (sx1280PacketMode == SX1280_PACKET_TYPE_FLRC) {
+        // No SNR in FLRC mode
+        *rssi = -(int8_t)(packetStats[1] / 2);
+        *snr = 0;
+    } else {
+        *rssi = -(int8_t)(packetStats[0] / 2);
+        *snr = (int8_t)packetStats[1];
+        int8_t negOffset = (*snr < 0) ? (*snr / 4) : 0;
+        *rssi += negOffset;
+    }
 }
 
-void sx1280DoFHSS(void)
+LOCAL_UNUSED_FUNCTION static void sx1280DoFHSS(void)
 {
     return;
 }
@@ -552,40 +608,38 @@ void sx1280ClearIrqStatus(const uint16_t irqMask)
 
 // Forward Definitions for DMA Chain //
 static void sx1280IrqGetStatus(extiCallbackRec_t *cb);
-static busStatus_e sx1280IrqStatusRead(uint32_t arg);
+static busStatus_e sx1280IrqStatusRead(uintptr_t arg);
 static void sx1280IrqClearStatus(extiCallbackRec_t *cb);
-static busStatus_e sx1280IrqCmdComplete(uint32_t arg);
+static busStatus_e sx1280IrqCmdComplete(uintptr_t arg);
 static void sx1280ProcessIrq(extiCallbackRec_t *cb);
-static busStatus_e sx1280GotFIFOAddr(uint32_t arg);
+static busStatus_e sx1280GotFIFOAddr(uintptr_t arg);
 static void sx1280DoReadBuffer(extiCallbackRec_t *cb);
-static busStatus_e sx1280ReadBufferComplete(uint32_t arg);
+static busStatus_e sx1280ReadBufferComplete(uintptr_t arg);
 static void sx1280GetPacketStats(extiCallbackRec_t *cb);
-static busStatus_e sx1280GetStatsCmdComplete(uint32_t arg);
-static busStatus_e sx1280IsFhssReq(uint32_t arg);
+static busStatus_e sx1280GetStatsCmdComplete(uintptr_t arg);
+static busStatus_e sx1280IsFhssReq(uintptr_t arg);
 static void sx1280SetFrequency(extiCallbackRec_t *cb);
-static busStatus_e sx1280SetFreqComplete(uint32_t arg);
+static busStatus_e sx1280SetFreqComplete(uintptr_t arg);
+static busStatus_e sx1280SetFreqCmdComplete(uintptr_t arg);
 static void sx1280StartReceivingDMA(extiCallbackRec_t *cb);
-static busStatus_e sx1280EnableIRQs(uint32_t arg);
+static busStatus_e sx1280EnableIRQs(uintptr_t arg);
 static void sx1280SendTelemetryBuffer(extiCallbackRec_t *cb);
-static busStatus_e sx1280TelemetryComplete(uint32_t arg);
+static busStatus_e sx1280TelemetryComplete(uintptr_t arg);
 static void sx1280StartTransmittingDMA(extiCallbackRec_t *cb);
 
-void sx1280ISR(void)
+FAST_IRQ_HANDLER void sx1280ISR(void)
 {
     // Only attempt to access the SX1280 if it is currently idle to avoid any race condition
-    ATOMIC_BLOCK(NVIC_PRIO_MAX) {
+    ATOMIC_BLOCK(NVIC_PRIO_RX_INT_EXTI) {
         if (sx1280EnableBusy()) {
-            pendingISR = false;
             sx1280SetBusyFn(sx1280IrqGetStatus);
-        } else {
-            pendingISR = true;
         }
     }
 }
 
 // Next, the reason for the IRQ must be read
 
-static void sx1280IrqGetStatus(extiCallbackRec_t *cb)
+FAST_IRQ_HANDLER static void sx1280IrqGetStatus(extiCallbackRec_t *cb)
 {
     extDevice_t *dev = rxSpiGetDevice();
 
@@ -597,16 +651,15 @@ static void sx1280IrqGetStatus(extiCallbackRec_t *cb)
     STATIC_DMA_DATA_AUTO uint8_t irqStatus[sizeof(irqStatusCmd)];
 
     static busSegment_t segments[] = {
-            {.u.buffers = {irqStatusCmd, irqStatus}, sizeof(irqStatusCmd), false, sx1280IrqStatusRead},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {irqStatusCmd, irqStatus}, sizeof(irqStatusCmd), true, sx1280IrqStatusRead},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     spiSequence(dev, segments);
 }
 
 // Read the IRQ status, and save it to irqStatus variable
-
-static busStatus_e sx1280IrqStatusRead(uint32_t arg)
+FAST_IRQ_HANDLER static busStatus_e sx1280IrqStatusRead(uintptr_t arg)
 {
     extDevice_t *dev = (extDevice_t *)arg;
 
@@ -616,6 +669,14 @@ static busStatus_e sx1280IrqStatusRead(uint32_t arg)
         irqReason = ELRS_DIO_TX_DONE;
     } else if (irqStatus & SX1280_IRQ_RX_DONE) {
         irqReason = ELRS_DIO_RX_DONE;
+
+        if (sx1280PacketMode == SX1280_PACKET_TYPE_FLRC) {
+            // Reject the packet early if CRC/Syncword error or syncword valid not set
+            if ((irqStatus & (SX1280_IRQ_CRC_ERROR | SX1280_IRQ_SYNCWORD_ERROR)) ||
+                !(irqStatus & SX1280_IRQ_SYNCWORD_VALID)) {
+                irqReason |= ELRS_DIO_HWERROR;
+            }
+        }
     } else {
         irqReason = ELRS_DIO_UNKNOWN;
     }
@@ -626,39 +687,41 @@ static busStatus_e sx1280IrqStatusRead(uint32_t arg)
 
 // Clear the IRQ bit in the Radio registers
 
-static void sx1280IrqClearStatus(extiCallbackRec_t *cb)
+FAST_IRQ_HANDLER static void sx1280IrqClearStatus(extiCallbackRec_t *cb)
 {
     extDevice_t *dev = rxSpiGetDevice();
 
     UNUSED(cb);
 
     sx1280ClearBusyFn();
-
     STATIC_DMA_DATA_AUTO uint8_t irqCmd[] = {SX1280_RADIO_CLR_IRQSTATUS, 0, 0};
 
     irqCmd[1] = (uint8_t)(((uint16_t)SX1280_IRQ_RADIO_ALL >> 8) & 0x00FF);
     irqCmd[2] = (uint8_t)((uint16_t)SX1280_IRQ_RADIO_ALL & 0x00FF);
 
     static busSegment_t segments[] = {
-            {.u.buffers = {irqCmd, NULL}, sizeof(irqCmd), false, sx1280IrqCmdComplete},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {irqCmd, NULL}, sizeof(irqCmd), true, sx1280IrqCmdComplete},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     spiSequence(dev, segments);
 }
 
 // Callback follow clear of IRQ status
-static busStatus_e sx1280IrqCmdComplete(uint32_t arg)
+FAST_IRQ_HANDLER static busStatus_e sx1280IrqCmdComplete(uintptr_t arg)
 {
     UNUSED(arg);
 
-    sx1280SetBusyFn(sx1280ProcessIrq);
+    // If HWERROR reported on RX, just do nothing and wait for the timer to expire
+    if (!(irqReason & ELRS_DIO_HWERROR)) {
+        sx1280SetBusyFn(sx1280ProcessIrq);
+    }
 
     return BUS_READY;
 }
 
 // Process IRQ status
-static void sx1280ProcessIrq(extiCallbackRec_t *cb)
+FAST_IRQ_HANDLER static void sx1280ProcessIrq(extiCallbackRec_t *cb)
 {
     extDevice_t *dev = rxSpiGetDevice();
 
@@ -666,15 +729,15 @@ static void sx1280ProcessIrq(extiCallbackRec_t *cb)
 
     sx1280ClearBusyFn();
 
-    if (irqReason == ELRS_DIO_RX_DONE || irqReason == ELRS_DIO_UNKNOWN) {
+    if (irqReason & ELRS_DIO_RX_DONE) {
         // Fire off the chain to read and decode the packet from the radio
         // Get the buffer status to determine the FIFO address
         STATIC_DMA_DATA_AUTO uint8_t cmdBufStatusCmd[] = {SX1280_RADIO_GET_RXBUFFERSTATUS, 0, 0, 0};
         STATIC_DMA_DATA_AUTO uint8_t bufStatus[sizeof(cmdBufStatusCmd)];
 
         static busSegment_t segments[] = {
-            {.u.buffers = {cmdBufStatusCmd, bufStatus}, sizeof(cmdBufStatusCmd), false, sx1280GotFIFOAddr},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {cmdBufStatusCmd, bufStatus}, sizeof(cmdBufStatusCmd), true, sx1280GotFIFOAddr},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
         };
 
         spiSequence(dev, segments);
@@ -684,8 +747,8 @@ static void sx1280ProcessIrq(extiCallbackRec_t *cb)
         STATIC_DMA_DATA_AUTO uint8_t irqSetRxCmd[] = {SX1280_RADIO_SET_RX, 0, 0xff, 0xff};
 
         static busSegment_t segments[] = {
-            {.u.buffers = {irqSetRxCmd, NULL}, sizeof(irqSetRxCmd), false, sx1280EnableIRQs},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {irqSetRxCmd, NULL}, sizeof(irqSetRxCmd), true, sx1280EnableIRQs},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
         };
 
         spiSequence(dev, segments);
@@ -693,7 +756,7 @@ static void sx1280ProcessIrq(extiCallbackRec_t *cb)
 }
 
 // First we read from the FIFO address register to determine the FIFO address
-static busStatus_e sx1280GotFIFOAddr(uint32_t arg)
+static busStatus_e sx1280GotFIFOAddr(uintptr_t arg)
 {
     extDevice_t *dev = (extDevice_t *)arg;
 
@@ -721,7 +784,7 @@ static void sx1280DoReadBuffer(extiCallbackRec_t *cb)
     static busSegment_t segments[] = {
             {.u.buffers = {cmdReadBuf, NULL}, sizeof(cmdReadBuf), false, NULL},
             {.u.buffers = {NULL, NULL}, ELRS_RX_TX_BUFF_SIZE, true, sx1280ReadBufferComplete},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     segments[1].u.buffers.rxData = (uint8_t *)expressLrsGetRxBuffer();
@@ -730,7 +793,7 @@ static void sx1280DoReadBuffer(extiCallbackRec_t *cb)
 }
 
 // Get the Packet Status and RSSI
-static busStatus_e sx1280ReadBufferComplete(uint32_t arg)
+static busStatus_e sx1280ReadBufferComplete(uintptr_t arg)
 {
     UNUSED(arg);
 
@@ -752,15 +815,15 @@ static void sx1280GetPacketStats(extiCallbackRec_t *cb)
     STATIC_DMA_DATA_AUTO uint8_t stats[sizeof(getStatsCmd)];
 
     static busSegment_t segments[] = {
-            {.u.buffers = {getStatsCmd, stats}, sizeof(getStatsCmd), false, sx1280GetStatsCmdComplete},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {getStatsCmd, stats}, sizeof(getStatsCmd), true, sx1280GetStatsCmdComplete},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     spiSequence(dev, segments);
 }
 
-// Process and decode the RF packet 
-static busStatus_e sx1280GetStatsCmdComplete(uint32_t arg)
+// Process and decode the RF packet
+static busStatus_e sx1280GetStatsCmdComplete(uintptr_t arg)
 {
     extDevice_t *dev = (extDevice_t *)arg;
     volatile uint8_t *payload = expressLrsGetPayloadBuffer();
@@ -776,24 +839,29 @@ static busStatus_e sx1280GetStatsCmdComplete(uint32_t arg)
 void sx1280HandleFromTock(void)
 {
     ATOMIC_BLOCK(NVIC_PRIO_MAX) {
-        if (expressLrsIsFhssReq()) {
+        // Evaluate the hop request first: it has side effects (advances the channel)
+        const bool hopDue = expressLrsIsFhssReq();
+        // A hop stays pending until the frequency command has been sent (see
+        // sx1280SetFreqCmdComplete). Retrying a pending one here, every tock, bounds
+        // recovery from a BUSY wait abandoned by sx1280HandleFromTick() to one
+        // packet period: a radio left on the wrong channel receives no packets.
+        if (hopDue || pendingDoFHSS) {
+            pendingDoFHSS = true;
             if (sx1280EnableBusy()) {
-                pendingDoFHSS = false;
                 sx1280SetBusyFn(sx1280SetFrequency);
-            } else {
-                pendingDoFHSS = true;
             }
         }
     }
 }
 
 // Next we need to check if we need to FHSS and then do so if needed
-static busStatus_e sx1280IsFhssReq(uint32_t arg)
+static busStatus_e sx1280IsFhssReq(uintptr_t arg)
 {
     UNUSED(arg);
 
     if (expressLrsIsFhssReq()) {
-        sx1280SetBusyFn(sx1280SetFrequency);   
+        pendingDoFHSS = true;   // until sent: this BUSY wait can be abandoned too
+        sx1280SetBusyFn(sx1280SetFrequency);
     } else {
         sx1280SetFreqComplete(arg);
     }
@@ -817,15 +885,26 @@ static void sx1280SetFrequency(extiCallbackRec_t *cb)
     setFreqCmd[3] = (uint8_t)(currentFreq & 0xFF);
 
     static busSegment_t segments[] = {
-            {.u.buffers = {setFreqCmd, NULL}, sizeof(setFreqCmd), false, sx1280SetFreqComplete},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {setFreqCmd, NULL}, sizeof(setFreqCmd), true, sx1280SetFreqCmdComplete},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     spiSequence(dev, segments);
 }
 
+// The frequency command has been sent: only now is a deferred hop serviced.
+// pendingDoFHSS is cleared here and nowhere earlier, so a hop survives both
+// sx1280SetFreqComplete() being reached without hopping (via sx1280IsFhssReq)
+// and a sequence abandoned by sx1280HandleFromTick() before the command went out.
+static busStatus_e sx1280SetFreqCmdComplete(uintptr_t arg)
+{
+    pendingDoFHSS = false;
+
+    return sx1280SetFreqComplete(arg);
+}
+
 // Determine if we need to go back to RX or if we need to send TLM data
-static busStatus_e sx1280SetFreqComplete(uint32_t arg)
+static busStatus_e sx1280SetFreqComplete(uintptr_t arg)
 {
     UNUSED(arg);
 
@@ -854,23 +933,18 @@ static void sx1280StartReceivingDMA(extiCallbackRec_t *cb)
     STATIC_DMA_DATA_AUTO uint8_t irqSetRxCmd[] = {SX1280_RADIO_SET_RX, 0, 0xff, 0xff};
 
     static busSegment_t segments[] = {
-            {.u.buffers = {irqSetRxCmd, NULL}, sizeof(irqSetRxCmd), false, sx1280EnableIRQs},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {irqSetRxCmd, NULL}, sizeof(irqSetRxCmd), true, sx1280EnableIRQs},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     spiSequence(dev, segments);
 }
 
-static busStatus_e sx1280EnableIRQs(uint32_t arg)
+static busStatus_e sx1280EnableIRQs(uintptr_t arg)
 {
     UNUSED(arg);
 
-    // Handle any queued interrupt processing
-    if (pendingISR) {
-        pendingISR = false;
-        sx1280SetBusyFn(sx1280IrqGetStatus);
-    } else if (pendingDoFHSS) {
-        pendingDoFHSS = false;
+    if (pendingDoFHSS) {
         sx1280SetBusyFn(sx1280SetFrequency);
     } else {
         // Switch back to waiting for EXTI interrupt
@@ -880,8 +954,7 @@ static busStatus_e sx1280EnableIRQs(uint32_t arg)
     return BUS_READY;
 }
 
-
-// Send telemetry response 
+// Send telemetry response
 static void sx1280SendTelemetryBuffer(extiCallbackRec_t *cb)
 {
     UNUSED(cb);
@@ -894,7 +967,7 @@ static void sx1280SendTelemetryBuffer(extiCallbackRec_t *cb)
     static busSegment_t segments[] = {
             {.u.buffers = {writeBufferCmd, NULL}, sizeof(writeBufferCmd), false, NULL},
             {.u.buffers = {NULL, NULL}, ELRS_RX_TX_BUFF_SIZE, true, sx1280TelemetryComplete},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     segments[1].u.buffers.txData = (uint8_t *)expressLrsGetTelemetryBuffer();
@@ -902,7 +975,7 @@ static void sx1280SendTelemetryBuffer(extiCallbackRec_t *cb)
     spiSequence(dev, segments);
 }
 
-static busStatus_e sx1280TelemetryComplete(uint32_t arg)
+static busStatus_e sx1280TelemetryComplete(uintptr_t arg)
 {
     UNUSED(arg);
 
@@ -925,8 +998,8 @@ static void sx1280StartTransmittingDMA(extiCallbackRec_t *cb)
     STATIC_DMA_DATA_AUTO uint8_t irqSetRxCmd[] = {SX1280_RADIO_SET_TX, 0, 0xff, 0xff};
 
     static busSegment_t segments[] = {
-            {.u.buffers = {irqSetRxCmd, NULL}, sizeof(irqSetRxCmd), false, sx1280EnableIRQs},
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.buffers = {irqSetRxCmd, NULL}, sizeof(irqSetRxCmd), true, sx1280EnableIRQs},
+            {.u.link = {NULL, NULL}, 0, false, NULL},
     };
 
     spiSequence(dev, segments);

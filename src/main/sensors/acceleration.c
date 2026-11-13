@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 
 #include "platform.h"
 
@@ -27,7 +28,6 @@
 
 #include "build/debug.h"
 
-#include "common/axis.h"
 #include "common/filter.h"
 #include "common/utils.h"
 
@@ -35,76 +35,186 @@
 
 #include "sensors/acceleration_init.h"
 #include "sensors/boardalignment.h"
+#include "sensors/gyro.h"
 
 #include "acceleration.h"
 
 FAST_DATA_ZERO_INIT acc_t acc;                       // acc access functions
+#ifdef USE_CRSF_ACCGYRO_TELEMETRY
+// Two-counter seqlock pattern for lock-free synchronization:
+// - accelSeq: only incremented by accUpdate (accumulator writes)
+// - resetSeq: only incremented by telemetry task (accumulator resets)
+// This ensures each seqlock has exactly one writer, avoiding dual-writer race conditions.
+// When resetSeq is odd (reset in progress), accUpdate skips accumulation to avoid corruption.
+// At most one sample per telemetry cycle may be skipped - negligible at 1kHz accel rate.
+static volatile uint32_t accelSeq;   // Sequence counter for accel writes (odd = write in progress)
+static volatile uint32_t resetSeq;   // Sequence counter for resets (odd = reset in progress)
+static volatile FAST_DATA_ZERO_INIT uint32_t downSampleCount;
+static volatile FAST_DATA_ZERO_INIT float downSampleSum[XYZ_AXIS_COUNT];
+static FAST_DATA_ZERO_INIT uint32_t snapshotCount;
+static FAST_DATA_ZERO_INIT float snapshotSum[XYZ_AXIS_COUNT];
+#endif
 
-static void applyAccelerationTrims(const flightDynamicsTrims_t *accelerationTrims)
+static inline void alignAccelerometer(void)
 {
-    acc.accADC[X] -= accelerationTrims->raw[X];
-    acc.accADC[Y] -= accelerationTrims->raw[Y];
-    acc.accADC[Z] -= accelerationTrims->raw[Z];
+    switch (acc.dev.accAlign) {
+        case ALIGN_CUSTOM:
+            alignSensorViaMatrix(&acc.accADC, &acc.dev.rotationMatrix);
+            break;
+        default:
+            alignSensorViaRotation(&acc.accADC, acc.dev.accAlign);
+            break;
+    }
 }
 
-void accUpdate(timeUs_t currentTimeUs, rollAndPitchTrims_t *rollAndPitchTrims)
+static inline void calibrateAccelerometer(void)
+{
+    if (!accIsCalibrationComplete()) {
+        // acc.accADC is held at 0 until calibration is completed
+        performAccelerometerCalibration(&accelerometerConfigMutable()->accelerometerTrims);
+    }
+
+    if (featureIsEnabled(FEATURE_INFLIGHT_ACC_CAL)) {
+        performInflightAccelerationCalibration(&accelerometerConfigMutable()->accelerometerTrims);
+    }
+}
+
+static inline void applyAccelerationTrims(const flightDynamicsTrims_t *accelerationTrims)
+{
+    acc.accADC.x -= accelerationTrims->raw[X];
+    acc.accADC.y -= accelerationTrims->raw[Y];
+    acc.accADC.z -= accelerationTrims->raw[Z];
+}
+
+static inline void postProcessAccelerometer(void)
+{
+    static vector3_t accAdcPrev;
+
+    for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+
+        // Apply anti-alias filter for attitude task (if enabled)
+        if (axis == gyro.gyroDebugAxis) {
+            DEBUG_SET(DEBUG_ACCELEROMETER, 0, lrintf(acc.accADC.v[axis]));  //!< Raw Accel (dbg-axis) [unit:accADC]
+        }
+
+        if (accelerationRuntime.accLpfCutHz) {
+            acc.accADC.v[axis] = pt2FilterApply(&accelerationRuntime.accFilter[axis], acc.accADC.v[axis]);
+        }
+
+        // Calculate derivative of acc (jerk)
+        acc.jerk.v[axis] = (acc.accADC.v[axis] - accAdcPrev.v[axis]) * acc.sampleRateHz;
+        accAdcPrev.v[axis] = acc.accADC.v[axis];
+
+        if (axis == gyro.gyroDebugAxis) {
+            DEBUG_SET(DEBUG_ACCELEROMETER, 1, lrintf(acc.accADC.v[axis]));        //!< Filtered Accel (dbg-axis) [unit:accADC]
+            DEBUG_SET(DEBUG_ACCELEROMETER, 3, lrintf(acc.jerk.v[axis] * 1e-2f));  //!< Jerk (dbg-axis) [unit:100accADC/s]
+        }
+    }
+
+    acc.accMagnitude = vector3Norm(&acc.accADC) * acc.dev.acc_1G_rec;
+    acc.jerkMagnitude = vector3Norm(&acc.jerk) * acc.dev.acc_1G_rec;
+
+    DEBUG_SET(DEBUG_ACCELEROMETER, 2, lrintf(acc.accMagnitude * 1e3f));   //!< Accel Magnitude [unit:0.001g]
+    DEBUG_SET(DEBUG_ACCELEROMETER, 4, lrintf(acc.jerkMagnitude * 1e3f));  //!< Jerk Magnitude [unit:0.001g/s]
+}
+
+void accUpdate(timeUs_t currentTimeUs)
 {
     UNUSED(currentTimeUs);
 
     if (!acc.dev.readFn(&acc.dev)) {
         return;
     }
-    acc.isAccelUpdatedAtLeastOnce = true;
 
     for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-        DEBUG_SET(DEBUG_ACCELEROMETER, axis, acc.dev.ADCRaw[axis]);
-        acc.accADC[axis] = acc.dev.ADCRaw[axis];
+        acc.accADC.v[axis] = acc.dev.ADCRaw[axis];
     }
 
-    if (accelerationRuntime.accLpfCutHz) {
-        for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-            acc.accADC[axis] = biquadFilterApply(&accelerationRuntime.accFilter[axis], acc.accADC[axis]);
-        }
-    }
-
-    if (acc.dev.accAlign == ALIGN_CUSTOM) {
-        alignSensorViaMatrix(acc.accADC, &acc.dev.rotationMatrix);
-    } else {
-        alignSensorViaRotation(acc.accADC, acc.dev.accAlign);
-    }
-
-    if (!accIsCalibrationComplete()) {
-        performAcclerationCalibration(rollAndPitchTrims);
-    }
-
-    if (featureIsEnabled(FEATURE_INFLIGHT_ACC_CAL)) {
-        performInflightAccelerationCalibration(rollAndPitchTrims);
-    }
-
+    alignAccelerometer();
+    calibrateAccelerometer();
     applyAccelerationTrims(accelerationRuntime.accelerationTrims);
+    postProcessAccelerometer();
 
-    ++accelerationRuntime.accumulatedMeasurementCount;
-    for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-        accelerationRuntime.accumulatedMeasurements[axis] += acc.accADC[axis];
+#ifdef USE_CRSF_ACCGYRO_TELEMETRY
+    // Skip accumulation if reset is in progress (resetSeq odd) to avoid corruption.
+    // At most one sample per telemetry cycle is skipped - negligible at 1kHz accel rate.
+    if (!(resetSeq & 1)) {
+        // Seqlock write: increment before modifying (makes accelSeq odd)
+        accelSeq++;
+        __asm volatile ("" ::: "memory");
+
+        downSampleSum[X] += acc.accADC.v[X];
+        downSampleSum[Y] += acc.accADC.v[Y];
+        downSampleSum[Z] += acc.accADC.v[Z];
+        downSampleCount++;
+
+        __asm volatile ("" ::: "memory");
+        accelSeq++;  // Increment after modifying (makes accelSeq even)
     }
-}
-
-bool accGetAccumulationAverage(float *accumulationAverage)
-{
-    if (accelerationRuntime.accumulatedMeasurementCount > 0) {
-        // If we have gyro data accumulated, calculate average rate that will yield the same rotation
-        for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-            accumulationAverage[axis] = accelerationRuntime.accumulatedMeasurements[axis] / accelerationRuntime.accumulatedMeasurementCount;
-            accelerationRuntime.accumulatedMeasurements[axis] = 0.0f;
-        }
-        accelerationRuntime.accumulatedMeasurementCount = 0;
-        return true;
-    } else {
-        for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
-            accumulationAverage[axis] = 0.0f;
-        }
-        return false;
-    }
-}
-
 #endif
+
+    acc.isAccelUpdatedAtLeastOnce = true;
+}
+
+#ifdef USE_CRSF_ACCGYRO_TELEMETRY
+bool accelHasDownsampledData(void)
+{
+    return snapshotCount > 0;
+}
+
+float accelGetDownsampled(int axis)
+{
+    if (snapshotCount == 0) {
+        return 0;  // No valid data yet
+    }
+    return snapshotSum[axis] / snapshotCount;
+}
+
+bool accelStartDownsampledCycle(void)
+{
+    // Phase 1: Read using accelSeq (protects against accUpdate writes)
+    uint32_t seq1;
+    float sum[XYZ_AXIS_COUNT];
+    uint32_t count;
+
+    do {
+        seq1 = accelSeq;
+        if (!(seq1 & 1)) {
+            // Even accelSeq means no write in progress, safe to copy
+            sum[X] = downSampleSum[X];
+            sum[Y] = downSampleSum[Y];
+            sum[Z] = downSampleSum[Z];
+            count = downSampleCount;
+
+            __asm volatile ("" ::: "memory");
+            if (seq1 == accelSeq) {
+                break;
+            }
+        }
+    } while (true);
+
+    // Only update snapshot if we got valid data
+    if (count > 0) {
+        snapshotSum[X] = sum[X];
+        snapshotSum[Y] = sum[Y];
+        snapshotSum[Z] = sum[Z];
+        snapshotCount = count;
+    }
+
+    // Phase 2: Reset using resetSeq (signals accUpdate to skip accumulation)
+    resetSeq++;  // Makes resetSeq odd - accUpdate will skip
+    __asm volatile ("" ::: "memory");
+
+    downSampleSum[X] = 0;
+    downSampleSum[Y] = 0;
+    downSampleSum[Z] = 0;
+    downSampleCount = 0;
+
+    __asm volatile ("" ::: "memory");
+    resetSeq++;  // Makes resetSeq even - accUpdate resumes
+
+    return count > 0;
+}
+#endif
+
+#endif // USE_ACC

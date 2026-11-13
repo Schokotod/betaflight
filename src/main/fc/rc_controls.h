@@ -22,10 +22,11 @@
 
 #include <stdbool.h>
 
+#include "common/axis.h"
 #include "common/filter.h"
 #include "pg/pg.h"
 
-typedef enum rc_alias {
+typedef enum {
     ROLL = 0,
     PITCH,
     YAW,
@@ -74,6 +75,22 @@ typedef enum {
 
 #define CONTROL_RATE_CONFIG_RC_EXPO_MAX  100
 
+#define AUTO_DISARM_DELAY_MAX  60
+
+#define RC_DEADBAND_MAX  32
+#define RC_YAW_DEADBAND_MAX  100
+
+#define DEADBAND3D_THROTTLE_MIN  1
+#define DEADBAND3D_THROTTLE_MAX  100
+
+#define CONTROL_RATE_CONFIG_THR_MID_MAX  100
+#define CONTROL_RATE_CONFIG_THR_EXPO_MAX  100
+#define CONTROL_RATE_CONFIG_THR_HOVER_MAX  100
+
+#define CONTROL_RATE_CONFIG_THROTTLE_LIMIT_PERCENT_MIN  25
+#define CONTROL_RATE_CONFIG_THROTTLE_LIMIT_PERCENT_MAX  100
+
+#define CONTROL_RATE_CONFIG_RC_RATES_MIN  1
 #define CONTROL_RATE_CONFIG_RC_RATES_MAX  255
 
 #define CONTROL_RATE_CONFIG_RATE_LIMIT_MIN  200
@@ -82,40 +99,29 @@ typedef enum {
 // (Super) rates are constrained to [0, 100] for Betaflight rates, so values higher than 100 won't make a difference. Range extended for RaceFlight rates.
 #define CONTROL_RATE_CONFIG_RATE_MAX  255
 
-#define CONTROL_RATE_CONFIG_TPA_MAX              100
-
 extern float rcCommand[4];
 
-typedef struct rcSmoothingFilterTraining_s {
-    float sum;
-    int count;
-    uint16_t min;
-    uint16_t max;
-} rcSmoothingFilterTraining_t;
-
 typedef struct rcSmoothingFilter_s {
-    bool filterInitialized;
-    pt3Filter_t filter[4];
-    pt3Filter_t filterDeflection[2];
+    pt3Filter_t filterSetpoint[PRIMARY_CHANNEL_COUNT];
+    pt3Filter_t filterRcDeflection[RP_AXIS_COUNT];
+    pt3Filter_t filterFeedforward[XYZ_AXIS_COUNT];
+
     uint8_t setpointCutoffSetting;
     uint8_t throttleCutoffSetting;
+
     uint16_t setpointCutoffFrequency;
     uint16_t throttleCutoffFrequency;
-    uint8_t ffCutoffSetting;
-    uint16_t feedforwardCutoffFrequency;
-    int averageFrameTimeUs;
-    rcSmoothingFilterTraining_t training;
+
     uint8_t debugAxis;
-    uint8_t autoSmoothnessFactorSetpoint;
-    uint8_t autoSmoothnessFactorThrottle;
+
+    float autoSmoothnessFactorSetpoint;
+    float autoSmoothnessFactorThrottle;
 } rcSmoothingFilter_t;
 
 typedef struct rcControlsConfig_s {
     uint8_t deadband;                       // introduce a deadband around the stick center for pitch and roll axis. Must be greater than zero.
     uint8_t yaw_deadband;                   // introduce a deadband around the stick center for yaw axis. Must be greater than zero.
-    uint8_t alt_hold_deadband;              // defines the neutral zone of throttle stick during altitude hold, default setting is +/-40
-    uint8_t alt_hold_fast_change;           // when disabled, turn off the althold when throttle stick is out of deadband defined with alt_hold_deadband; when enabled, altitude changes slowly proportional to stick movement
-    bool yaw_control_reversed;            // invert control direction of yaw
+    bool yaw_control_reversed;              // invert control direction of yaw
 } rcControlsConfig_t;
 
 PG_DECLARE(rcControlsConfig_t, rcControlsConfig);
@@ -133,19 +139,22 @@ typedef struct flight3DConfig_s {
 PG_DECLARE(flight3DConfig_t, flight3DConfig);
 
 typedef struct armingConfig_s {
-    uint8_t gyro_cal_on_first_arm;          // allow disarm/arm on throttle down + roll left/right
+    uint8_t gyro_cal_on_first_arm;          // calibrate the gyro right before the first arm
     uint8_t auto_disarm_delay;              // allow automatically disarming multicopters after auto_disarm_delay seconds of zero throttle. Disabled when 0
+    uint8_t prearm_allow_rearm;
 } armingConfig_t;
 
 PG_DECLARE(armingConfig_t, armingConfig);
 
 bool areUsingSticksToArm(void);
 
-bool areSticksInApModePosition(uint16_t ap_mode);
 throttleStatus_e calculateThrottleStatus(void);
-void processRcStickPositions();
+void processRcStickPositions(void);
 
 bool isUsingSticksForArming(void);
 
-int32_t getRcStickDeflection(int32_t axis, uint16_t midrc);
 void rcControlsInit(void);
+
+bool wasLastDisarmUserRequested(void); // Check if the user has requested a disarm since the last cleared
+
+void clearWasLastDisarmUserRequested(void); // Clear the user disarm request flag

@@ -32,12 +32,19 @@ typedef enum {
     CURRENT_METER_COUNT
 } currentMeterSource_e;
 
+#define CURRENT_METER_SCALE_MAX 16000
+#define CURRENT_METER_ADC_OFFSET_MAX 32000
+#define CURRENT_METER_VIRTUAL_OFFSET_MAX 16000
+
 extern const char * const currentMeterSourceNames[CURRENT_METER_COUNT];
 
 typedef struct currentMeter_s {
     int32_t amperage;           // current read by current sensor in centiampere (1/100th A)
     int32_t amperageLatest;     // current read by current sensor in centiampere (1/100th A) (unfiltered)
     int32_t mAhDrawn;           // milliampere hours drawn from the battery since start
+#ifdef USE_BATTERY_CONTINUE
+    int32_t mAhDrawnOffset;     // mAh offset
+#endif
 } currentMeter_t;
 
 // WARNING - do not mix usage of CURRENT_SENSOR_* and CURRENT_METER_*, they are separate concerns.
@@ -57,7 +64,6 @@ typedef enum {
     CURRENT_SENSOR_ESC,
     CURRENT_SENSOR_MSP
 } currentSensor_e;
-
 
 //
 // ADC
@@ -101,7 +107,6 @@ typedef struct currentMeterESCState_s {
     int32_t amperage;           // current read by current sensor in centiampere (1/100th A)
 } currentMeterESCState_t;
 
-
 //
 // MSP
 //
@@ -110,7 +115,6 @@ typedef struct currentMeterMSPState_s {
     int32_t mAhDrawn;           // milliampere hours drawn from the battery since start
     int32_t amperage;           // current read by current sensor in centiampere (1/100th A)
 } currentMeterMSPState_t;
-
 
 //
 // Current Meter API

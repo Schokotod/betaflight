@@ -28,7 +28,6 @@
 
 #include "drivers/bus_spi.h"
 #include "drivers/io.h"
-#include "drivers/io_impl.h"
 #include "drivers/rx/rx_a7105.h"
 #include "drivers/rx/rx_spi.h"
 
@@ -76,7 +75,8 @@ void A7105Config(const uint8_t *regsTable, uint8_t size)
     }
 }
 
-bool A7105RxTxFinished(timeUs_t *timeStamp) {
+bool A7105RxTxFinished(timeUs_t *timeStamp)
+{
     bool result = false;
 
     if (consumeExti && rxSpiPollExti()) {

@@ -24,7 +24,13 @@
 
 #include "pg/pg.h"
 
-#define GET_FRAME_ERR_LPF_FREQUENCY(period) (1 / (period / 10.0f))
+#define RX_MIDRC_MIN 1200
+#define RX_MIDRC_MAX 1700
+#define RX_MIN_CHECK_DEFAULT 1050
+#define RX_MAX_CHECK_DEFAULT 1900
+#define RX_FPV_CAM_ANGLE_MAX 90
+
+#define GET_FRAME_ERR_LPF_FREQUENCY(period) (10.0f / period)  // period in deciseconds (0.1s)
 #define FRAME_ERR_RESAMPLE_US 100000
 
 typedef struct rxConfig_s {
@@ -49,20 +55,21 @@ typedef struct rxConfig_s {
     uint8_t max_aux_channel;
     uint8_t rssi_src_frame_errors;             // true to use frame drop flags in the rx protocol
     int8_t rssi_offset;                        // offset applied to the RSSI value before it is returned
-    uint8_t rc_smoothing_mode;                 // Whether filter based rc smoothing is on or off
+    uint8_t rc_smoothing;                      // Whether filter based rc smoothing is on or off
     uint8_t rc_smoothing_setpoint_cutoff;      // Filter cutoff frequency for the setpoint filter (0 = auto)
-    uint8_t rc_smoothing_feedforward_cutoff;   // Filter cutoff frequency for the feedforward filter (0 = auto)
     uint8_t rc_smoothing_throttle_cutoff;      // Filter cutoff frequency for the setpoint filter (0 = auto)
     uint8_t rc_smoothing_debug_axis;           // Axis to log as debug values when debug_mode = RC_SMOOTHING
     uint8_t rc_smoothing_auto_factor_rpy;      // Used to adjust the "smoothness" determined by the auto cutoff calculations
     uint8_t rc_smoothing_auto_factor_throttle; // Used to adjust the "smoothness" determined by the auto cutoff calculations
     uint8_t rssi_src_frame_lpf_period;         // Period of the cutoff frequency for the source frame RSSI filter (in 0.1 s)
+    uint8_t rssi_smoothing;                    // Smoothing factor to reduce jumpiness of rssi, rssiDbm and rsnr
     uint8_t srxl2_unit_id;                     // Spektrum SRXL2 RX unit id
     uint8_t srxl2_baud_fast;                   // Select Spektrum SRXL2 fast baud rate
     uint8_t sbus_baud_fast;                    // Select SBus fast baud rate
-    uint8_t crsf_use_rx_snr;                   // Use RX SNR (in dB) instead of RSSI dBm for CRSF
     uint32_t msp_override_channels_mask;       // Channels to override when the MSP override mode is enabled
+    uint8_t msp_override_failsafe;             // if false then extra RC link is always required in msp_override mode, true - allows control via msp_override without extra RC link (autonomous use case)
     uint8_t crsf_use_negotiated_baud;          // Use negotiated baud rate for CRSF V3
+    int8_t rx_uart;                            // serialPortIdentifier_e; SERIAL_PORT_NONE = unassigned
 } rxConfig_t;
 
 PG_DECLARE(rxConfig_t, rxConfig);

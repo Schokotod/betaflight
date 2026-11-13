@@ -20,17 +20,21 @@
 
 #pragma once
 
+#include "platform.h"
+
 typedef enum {
     SENSOR_INDEX_GYRO = 0,
     SENSOR_INDEX_ACC,
     SENSOR_INDEX_BARO,
     SENSOR_INDEX_MAG,
     SENSOR_INDEX_RANGEFINDER,
+    SENSOR_INDEX_OPTICALFLOW,
+    SENSOR_INDEX_PITOT,
     SENSOR_INDEX_COUNT
 } sensorIndex_e;
 
-extern uint8_t requestedSensors[SENSOR_INDEX_COUNT];
 extern uint8_t detectedSensors[SENSOR_INDEX_COUNT];
+extern uint8_t detectedGyros[GYRO_COUNT];
 
 typedef struct int16_flightDynamicsTrims_s {
     int16_t roll;
@@ -52,5 +56,20 @@ typedef enum {
     SENSOR_SONAR = 1 << 4,
     SENSOR_RANGEFINDER = 1 << 4,
     SENSOR_GPS = 1 << 5,
-    SENSOR_GPSMAG = 1 << 6
+    SENSOR_GPSMAG = 1 << 6,
+    SENSOR_OPTICALFLOW = 1 << 7,
+    SENSOR_PITOT = 1 << 8
 } sensors_e;
+
+extern const char * const lookupTableGyroHardware[];
+extern const char * const lookupTableAccHardware[];
+extern const char * const lookupTableBaroHardware[];
+extern const char * const lookupTableMagHardware[];
+extern const char * const lookupTableRangefinderHardware[];
+extern const char * const lookupTableOpticalflowHardware[];
+extern const char * const lookupTablePitotHardware[];
+
+const char * const *sensorHardwareNames(sensorIndex_e sensor, int *count);
+uint32_t sensorMaskForIndex(sensorIndex_e sensor);
+sensorIndex_e sensorIndexFromName(const char *name);
+const char *sensorTypeName(sensorIndex_e sensor);

@@ -24,10 +24,9 @@
 #include <stdbool.h>
 
 #include "pg/pg.h"
-#include "drivers/io_types.h"
-#include "drivers/dma_reqmap.h"
+#include "drivers/serial_resource.h"
 
-#define UARTDEV_CONFIG_MAX 8 // Alternative to UARTDEV_COUNT_MAX, which requires serial_uart_imp.h
+#define UARTDEV_CONFIG_MAX (RESOURCE_UART_COUNT + RESOURCE_LPUART_COUNT)
 
 typedef struct serialUartConfig_s {
     int8_t txDmaopt;

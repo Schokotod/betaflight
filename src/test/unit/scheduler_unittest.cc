@@ -18,18 +18,10 @@
 #include <stdint.h>
 
 extern "C" {
+    #include "drivers/accgyro/accgyro.h"
     #include "platform.h"
-    #include "pg/pg.h"
-    #include "pg/pg_ids.h"
-    #include "pg/scheduler.h"
     #include "scheduler/scheduler.h"
-
-    PG_REGISTER_WITH_RESET_TEMPLATE(schedulerConfig_t, schedulerConfig, PG_SCHEDULER_CONFIG, 0);
-
-    PG_RESET_TEMPLATE(schedulerConfig_t, schedulerConfig,
-        .rxRelaxDeterminism = 25,
-        .osdRelaxDeterminism = 25,
-    );
+    #include "scheduler_stubs.h"
 }
 
 #include "unittest_macros.h"
@@ -54,8 +46,8 @@ const int TEST_UPDATE_OSD_TIME = 30;
 #define TASK_PERIOD_HZ(hz) (1000000 / (hz))
 
 extern "C" {
-    task_t * unittest_scheduler_selectedTask;
-    uint8_t unittest_scheduler_selectedTaskDynPrio;
+    extern task_t * unittest_scheduler_selectedTask;
+    extern uint8_t unittest_scheduler_selectedTaskDynPrio;
     timeDelta_t unittest_scheduler_taskRequiredTimeUs;
     bool taskGyroRan = false;
     bool taskFilterRan = false;
@@ -67,7 +59,6 @@ extern "C" {
     int16_t debug[1];
     uint8_t debugMode = 0;
 
-    bool rxFrameReady(void) { return 0; }
     void rxFrameCheck(timeUs_t, timeDelta_t) {}
 
     // set up micros() to simulate time
@@ -76,11 +67,14 @@ extern "C" {
     uint32_t millis(void) { return simulatedTime/1000; } // Note simplistic mapping suitable only for short unit tests
     int32_t clockCyclesToMicros(int32_t x) { return x/10;}
     int32_t clockCyclesTo10thMicros(int32_t x) { return x;}
+    int32_t clockCyclesTo100thMicros(int32_t x) { return x * 10;}
     uint32_t clockMicrosToCycles(uint32_t x) { return x*10;}
     uint32_t getCycleCounter(void) {return simulatedTime * 10;}
 
     // set up tasks to take a simulated representative time to execute
     bool gyroFilterReady(void) { return taskFilterReady; }
+    gyroDev_t gyro;
+    gyroDev_t *gyroActiveDev(void) { return &gyro; }
     bool pidLoopReady(void) { return taskPidReady; }
     void failsafeCheckDataFailurePeriod(void) {}
     void failsafeUpdateState(void) {}
@@ -109,82 +103,11 @@ extern "C" {
     extern task_t* taskQueueArray[];
 
     extern void queueClear(void);
-    extern bool queueContains(task_t *task);
+    extern bool queueContains(const task_t *task);
     extern bool queueAdd(task_t *task);
     extern bool queueRemove(task_t *task);
     extern task_t *queueFirst(void);
     extern task_t *queueNext(void);
-
-    task_attribute_t task_attributes[TASK_COUNT] = {
-        [TASK_SYSTEM] = {
-            .taskName = "SYSTEM",
-            .taskFunc = taskSystemLoad,
-            .desiredPeriodUs = TASK_PERIOD_HZ(10),
-            .staticPriority = TASK_PRIORITY_MEDIUM_HIGH,
-        },
-        [TASK_GYRO] = {
-            .taskName = "GYRO",
-            .taskFunc = taskGyroSample,
-            .desiredPeriodUs = TASK_PERIOD_HZ(TEST_GYRO_SAMPLE_HZ),
-            .staticPriority = TASK_PRIORITY_REALTIME,
-        },
-        [TASK_FILTER] = {
-            .taskName = "FILTER",
-            .taskFunc = taskFiltering,
-            .desiredPeriodUs = TASK_PERIOD_HZ(4000),
-            .staticPriority = TASK_PRIORITY_REALTIME,
-        },
-        [TASK_PID] = {
-            .taskName = "PID",
-            .taskFunc = taskMainPidLoop,
-            .desiredPeriodUs = TASK_PERIOD_HZ(4000),
-            .staticPriority = TASK_PRIORITY_REALTIME,
-        },
-        [TASK_ACCEL] = {
-            .taskName = "ACCEL",
-            .taskFunc = taskUpdateAccelerometer,
-            .desiredPeriodUs = TASK_PERIOD_HZ(1000),
-            .staticPriority = TASK_PRIORITY_MEDIUM,
-        },
-        [TASK_ATTITUDE] = {
-            .taskName = "ATTITUDE",
-            .taskFunc = imuUpdateAttitude,
-            .desiredPeriodUs = TASK_PERIOD_HZ(100),
-            .staticPriority = TASK_PRIORITY_MEDIUM,
-        },
-        [TASK_RX] = {
-            .taskName = "RX",
-            .checkFunc = rxUpdateCheck,
-            .taskFunc = taskUpdateRxMain,
-            .desiredPeriodUs = TASK_PERIOD_HZ(50),
-            .staticPriority = TASK_PRIORITY_HIGH,
-        },
-        [TASK_SERIAL] = {
-            .taskName = "SERIAL",
-            .taskFunc = taskHandleSerial,
-            .desiredPeriodUs = TASK_PERIOD_HZ(100),
-            .staticPriority = TASK_PRIORITY_LOW,
-        },
-        [TASK_DISPATCH] = {
-            .taskName = "DISPATCH",
-            .taskFunc = dispatchProcess,
-            .desiredPeriodUs = TASK_PERIOD_HZ(1000),
-            .staticPriority = TASK_PRIORITY_HIGH,
-        },
-        [TASK_BATTERY_VOLTAGE] = {
-            .taskName = "BATTERY_VOLTAGE",
-            .taskFunc = taskUpdateBatteryVoltage,
-            .desiredPeriodUs = TASK_PERIOD_HZ(50),
-            .staticPriority = TASK_PRIORITY_MEDIUM,
-        },
-        [TASK_OSD] = {
-            .taskName = "OSD",
-            .checkFunc = osdUpdateCheck,
-            .taskFunc = osdUpdate,
-            .desiredPeriodUs = TASK_PERIOD_HZ(12),
-            .staticPriority = TASK_PRIORITY_LOW,
-        }
-    };
 
     task_t tasks[TASK_COUNT];
 

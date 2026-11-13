@@ -27,6 +27,7 @@ extern "C" {
 
     #include "common/axis.h"
     #include "common/color.h"
+    #include "common/utils.h"
 
     #include "pg/pg.h"
     #include "pg/pg_ids.h"
@@ -35,7 +36,7 @@ extern "C" {
     #include "drivers/io.h"
     #include "drivers/light_ws2811strip.h"
     #include "drivers/timer.h"
-    #include "drivers/timer_def.h"
+    #include "timer_def.h"
 
     #include "config/config.h"
     #include "fc/rc_controls.h"
@@ -48,6 +49,8 @@ extern "C" {
     #include "rx/rx.h"
 
     #include "sensors/battery.h"
+
+    #include "scheduler/scheduler.h"
 
     #include "target.h"
 }
@@ -73,45 +76,45 @@ extern "C" {
 TEST(LedStripTest, parseLedStripConfig)
 {
     // given
-    memset(&ledStripStatusModeConfigMutable()->ledConfigs, 0, LED_MAX_STRIP_LENGTH);
+    memset(&ledStripStatusModeConfigMutable()->ledConfigs, 0, sizeof(ledStripStatusModeConfigMutable()->ledConfigs));
 
     // and
     static const ledConfig_t expectedLedStripConfig[WS2811_LED_STRIP_LENGTH] = {
-            DEFINE_LED(9, 9, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING), 0),
-            DEFINE_LED(10, 10, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING), 0),
-            DEFINE_LED(11, 11, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(11, 11, 0, LD(EAST), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(10, 10, 0, LD(EAST), LF(FLIGHT_MODE), 0, 0),
+            DEFINE_LED(9, 9, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING)),
+            DEFINE_LED(10, 10, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING)),
+            DEFINE_LED(11, 11, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(11, 11, 0, LD(EAST), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(10, 10, 0, LD(EAST), LF(FLIGHT_MODE), 0),
 
-            DEFINE_LED(10, 5, 0, LD(SOUTH), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(11, 4, 0, LD(SOUTH), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(12, 3, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(12, 2, 0, LD(NORTH), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(11, 1, 0, LD(NORTH), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(10, 0, 0, LD(NORTH), LF(FLIGHT_MODE), 0, 0),
+            DEFINE_LED(10, 5, 0, LD(SOUTH), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(11, 4, 0, LD(SOUTH), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(12, 3, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(12, 2, 0, LD(NORTH), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(11, 1, 0, LD(NORTH), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(10, 0, 0, LD(NORTH), LF(FLIGHT_MODE), 0),
 
-            DEFINE_LED(7, 0, 0, LD(NORTH), LF(FLIGHT_MODE), LO(WARNING), 0),
-            DEFINE_LED(6, 0, 1, LD(NORTH), LF(COLOR), LO(WARNING), 0),
-            DEFINE_LED(5, 0, 1, LD(NORTH), LF(COLOR), LO(WARNING), 0),
-            DEFINE_LED(4, 0, 0, LD(NORTH), LF(FLIGHT_MODE), LO(WARNING), 0),
+            DEFINE_LED(7, 0, 0, LD(NORTH), LF(FLIGHT_MODE), LO(WARNING)),
+            DEFINE_LED(6, 0, 1, LD(NORTH), LF(COLOR), LO(WARNING)),
+            DEFINE_LED(5, 0, 1, LD(NORTH), LF(COLOR), LO(WARNING)),
+            DEFINE_LED(4, 0, 0, LD(NORTH), LF(FLIGHT_MODE), LO(WARNING)),
 
-            DEFINE_LED(2, 0, 0, LD(NORTH), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(1, 1, 0, LD(NORTH), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(0, 2, 0, LD(NORTH), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(0, 3, 0, LD(WEST), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(1, 4, 0, LD(WEST), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(2, 5, 0, LD(WEST), LF(FLIGHT_MODE), 0, 0),
+            DEFINE_LED(2, 0, 0, LD(NORTH), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(1, 1, 0, LD(NORTH), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(0, 2, 0, LD(NORTH), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(0, 3, 0, LD(WEST), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(1, 4, 0, LD(WEST), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(2, 5, 0, LD(WEST), LF(FLIGHT_MODE), 0),
 
-            DEFINE_LED(1, 10, 0, LD(WEST), LF(FLIGHT_MODE), 0, 0),
-            DEFINE_LED(0, 11, 0, LD(WEST), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(0, 11, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR), 0),
-            DEFINE_LED(1, 10, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING), 0),
-            DEFINE_LED(2, 9, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING), 0),
+            DEFINE_LED(1, 10, 0, LD(WEST), LF(FLIGHT_MODE), 0),
+            DEFINE_LED(0, 11, 0, LD(WEST), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(0, 11, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR)),
+            DEFINE_LED(1, 10, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING)),
+            DEFINE_LED(2, 9, 0, LD(SOUTH), LF(FLIGHT_MODE), LO(WARNING)),
 
-            DEFINE_LED(7, 7, 14, 0, LF(THRUST_RING), 0, 0),
-            DEFINE_LED(8, 7, 15, 0, LF(THRUST_RING), 0, 0),
-            DEFINE_LED(8, 8, 14, 0, LF(THRUST_RING), 0, 0),
-            DEFINE_LED(7, 8, 15, 0, LF(THRUST_RING), 0, 0),
+            DEFINE_LED(7, 7, 14, 0, LF(THRUST_RING), 0),
+            DEFINE_LED(8, 7, 15, 0, LF(THRUST_RING), 0),
+            DEFINE_LED(8, 8, 14, 0, LF(THRUST_RING), 0),
+            DEFINE_LED(7, 8, 15, 0, LF(THRUST_RING), 0),
 
             0,
             0
@@ -165,7 +168,7 @@ TEST(LedStripTest, parseLedStripConfig)
     };
 
     // when
-    for (uint8_t index = 0; index < (sizeof(ledStripConfigCommands) / sizeof(ledStripConfigCommands[0])); index++) {
+    for (uint8_t index = 0; index < ARRAYLEN(ledStripConfigCommands); index++) {
         EXPECT_TRUE(parseLedStripConfig(index, ledStripConfigCommands[index]));
     }
 
@@ -194,17 +197,17 @@ TEST(LedStripTest, parseLedStripConfig)
 TEST(LedStripTest, smallestGridWithCenter)
 {
     // given
-    memset(&ledStripStatusModeConfigMutable()->ledConfigs, 0, LED_MAX_STRIP_LENGTH);
+    memset(&ledStripStatusModeConfigMutable()->ledConfigs, 0, sizeof(ledStripStatusModeConfigMutable()->ledConfigs));
 
     // and
     static const ledConfig_t testLedConfigs[] = {
-        DEFINE_LED(2, 2, 0, LD(EAST), LF(ARM_STATE), LO(INDICATOR), 0),
-        DEFINE_LED(2, 1, 0, LD(NORTH) | LD(EAST), LF(FLIGHT_MODE), LO(WARNING), 0),
-        DEFINE_LED(2, 0, 0, LD(NORTH), LF(ARM_STATE), LO(INDICATOR), 0),
-        DEFINE_LED(1, 0, 0, LD(NORTH) | LD(WEST), LF(FLIGHT_MODE), LO(WARNING), 0),
-        DEFINE_LED(0, 0, 0, LD(WEST), LF(ARM_STATE), LO(INDICATOR), 0),
-        DEFINE_LED(0, 1, 0, LD(SOUTH) | LD(WEST), LF(FLIGHT_MODE), LO(WARNING), 0),
-        DEFINE_LED(0, 2, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR), 0)
+        DEFINE_LED(2, 2, 0, LD(EAST), LF(ARM_STATE), LO(INDICATOR)),
+        DEFINE_LED(2, 1, 0, LD(NORTH) | LD(EAST), LF(FLIGHT_MODE), LO(WARNING)),
+        DEFINE_LED(2, 0, 0, LD(NORTH), LF(ARM_STATE), LO(INDICATOR)),
+        DEFINE_LED(1, 0, 0, LD(NORTH) | LD(WEST), LF(FLIGHT_MODE), LO(WARNING)),
+        DEFINE_LED(0, 0, 0, LD(WEST), LF(ARM_STATE), LO(INDICATOR)),
+        DEFINE_LED(0, 1, 0, LD(SOUTH) | LD(WEST), LF(FLIGHT_MODE), LO(WARNING)),
+        DEFINE_LED(0, 2, 0, LD(SOUTH), LF(ARM_STATE), LO(INDICATOR))
     };
     memcpy(&ledStripStatusModeConfigMutable()->ledConfigs, &testLedConfigs, sizeof(testLedConfigs));
 
@@ -222,14 +225,14 @@ TEST(LedStripTest, smallestGridWithCenter)
 TEST(LedStripTest, smallestGrid)
 {
     // given
-    memset(&ledStripStatusModeConfigMutable()->ledConfigs, 0, LED_MAX_STRIP_LENGTH);
+    memset(&ledStripStatusModeConfigMutable()->ledConfigs, 0, sizeof(ledStripStatusModeConfigMutable()->ledConfigs));
 
     // and
     static const ledConfig_t testLedConfigs[] = {
-        DEFINE_LED(1, 1, 0, LD(SOUTH) | LD(EAST), LF(FLIGHT_MODE), LO(INDICATOR), 0),
-        DEFINE_LED(1, 0, 0, LD(NORTH) | LD(EAST), LF(FLIGHT_MODE), LO(INDICATOR), 0),
-        DEFINE_LED(0, 0, 0, LD(NORTH) | LD(WEST), LF(FLIGHT_MODE), LO(INDICATOR), 0),
-        DEFINE_LED(0, 1, 0, LD(SOUTH) | LD(WEST), LF(FLIGHT_MODE), LO(INDICATOR), 0)
+        DEFINE_LED(1, 1, 0, LD(SOUTH) | LD(EAST), LF(FLIGHT_MODE), LO(INDICATOR)),
+        DEFINE_LED(1, 0, 0, LD(NORTH) | LD(EAST), LF(FLIGHT_MODE), LO(INDICATOR)),
+        DEFINE_LED(0, 0, 0, LD(NORTH) | LD(WEST), LF(FLIGHT_MODE), LO(INDICATOR)),
+        DEFINE_LED(0, 1, 0, LD(SOUTH) | LD(WEST), LF(FLIGHT_MODE), LO(INDICATOR))
     };
     memcpy(&ledStripStatusModeConfigMutable()->ledConfigs, &testLedConfigs, sizeof(testLedConfigs));
 
@@ -300,45 +303,56 @@ uint8_t stateFlags = 0;
 uint16_t flightModeFlags = 0;
 float rcCommand[4];
 float rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
-boxBitmask_t rcModeActivationMask;
+extern boxBitmask_t rcModeActivationMask;
 gpsSolutionData_t gpsSol;
 
-batteryState_e getBatteryState(void) {
+uint8_t gnssGetMinSats(void) { return 4; }
+
+batteryState_e getBatteryState(void)
+{
     return BATTERY_OK;
 }
 
-void ws2811LedStripInit(ioTag_t ioTag) {
+void ws2811LedStripInit(ioTag_t ioTag, ledStripFormatRGB_e ledFormat)
+{
     UNUSED(ioTag);
+    UNUSED(ledFormat);
 }
 
-void ws2811UpdateStrip(ledStripFormatRGB_e, uint8_t) {}
+bool ws2811UpdateStrip(uint8_t) {return true;}
 
-void setLedValue(uint16_t index, const uint8_t value) {
+void setLedValue(uint16_t index, const uint8_t value)
+{
     UNUSED(index);
     UNUSED(value);
 }
 
-void setLedHsv(uint16_t index, const hsvColor_t *color) {
+void setLedHsv(uint16_t index, const hsvColor_t *color)
+{
     UNUSED(index);
     UNUSED(color);
 }
 
-void getLedHsv(uint16_t index, hsvColor_t *color) {
+void getLedHsv(uint16_t index, hsvColor_t *color)
+{
     UNUSED(index);
     UNUSED(color);
 }
 
 
-void scaleLedValue(uint16_t index, const uint8_t scalePercent) {
+void scaleLedValue(uint16_t index, const uint8_t scalePercent)
+{
     UNUSED(index);
     UNUSED(scalePercent);
 }
 
-void setStripColor(const hsvColor_t *color) {
+void setStripColor(const hsvColor_t *color)
+{
     UNUSED(color);
 }
 
-void setStripColors(const hsvColor_t *colors) {
+void setStripColors(const hsvColor_t *colors)
+{
     UNUSED(colors);
 }
 
@@ -355,14 +369,27 @@ uint32_t micros(void) { return 0; }
 uint32_t millis(void) { return 0; }
 
 bool shouldSoundBatteryAlarm(void) { return false; }
-bool featureIsEnabled(uint32_t mask) {
+bool featureIsEnabled(uint32_t mask)
+{
     UNUSED(mask);
     return false;
 }
 
 void tfp_sprintf(char *, char*, ...) { }
 
-int scaleRange(int x, int srcMin, int srcMax, int destMin, int destMax) {
+int scaleRange(int x, int srcMin, int srcMax, int destMin, int destMax)
+{
+    UNUSED(x);
+    UNUSED(srcMin);
+    UNUSED(srcMax);
+    UNUSED(destMin);
+    UNUSED(destMax);
+
+    return 0;
+}
+
+float scaleRangef(float x, float srcMin, float srcMax, float destMin, float destMax)
+{
     UNUSED(x);
     UNUSED(srcMin);
     UNUSED(srcMax);
@@ -373,11 +400,12 @@ int scaleRange(int x, int srcMin, int srcMax, int destMin, int destMax) {
 }
 
 bool failsafeIsActive() { return false; }
-bool rxIsReceivingSignal() { return true; }
+bool isRxReceivingSignal() { return true; }
 
 bool isBeeperOn() { return false; };
 
 uint8_t calculateBatteryPercentageRemaining() { return 0; }
+uint32_t getEstimatedAltitudeCm() { return 0; }
 
 bool sensors(uint32_t mask)
 {
@@ -385,19 +413,19 @@ bool sensors(uint32_t mask)
     return false;
 };
 
-const timerHardware_t timerHardware[USABLE_TIMER_CHANNEL_COUNT] = {};
-
 bool isArmingDisabled(void) { return false; }
 
 uint8_t getRssiPercent(void) { return 0; }
 
-bool isFlipOverAfterCrashActive(void) { return false; }
+bool isCrashFlipModeActive(void) { return false; }
 
 void ws2811LedStripEnable(void) { }
 
 void setUsedLedCount(unsigned) { }
 void pinioBoxTaskControl(void) {}
+void rescheduleTask(taskId_e, timeDelta_t){}
 void schedulerIgnoreTaskExecTime(void) {}
+void schedulerIgnoreTaskExecRate(void) {}
 bool schedulerGetIgnoreTaskExecTime() { return false; }
 void schedulerSetNextStateTime(timeDelta_t) {}
 }

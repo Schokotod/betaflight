@@ -26,6 +26,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
+#include <stdlib.h>
 
 #include "platform.h"
 
@@ -44,6 +46,7 @@
 #include "drivers/sensor.h"
 #include "drivers/serial.h"
 #include "drivers/time.h"
+#include "drivers/dshot.h"
 
 #include "config/config.h"
 #include "fc/rc_controls.h"
@@ -74,7 +77,7 @@
 #include "frsky_hub.h"
 
 static serialPort_t *frSkyHubPort = NULL;
-static const serialPortConfig_t *portConfig = NULL;
+static serialPortIdentifier_e telemetryPort = SERIAL_PORT_NONE;
 
 #define FRSKY_HUB_BAUDRATE 9600
 #define FRSKY_HUB_INITIAL_PORT_MODE MODE_TX
@@ -128,7 +131,7 @@ static frSkyHubWriteByteFn *frSkyHubWriteByte = NULL;
 #define ID_VERT_SPEED         0x30 // opentx vario
 
 #define GPS_BAD_QUALITY       300
-#define GPS_MAX_HDOP_VAL      9999
+#define GPS_MAX_DOP_VAL      9999
 #define DELAY_FOR_BARO_INITIALISATION_US 5000000
 #define BLADE_NUMBER_DIVIDER  5 // should set 12 blades in Taranis
 
@@ -178,7 +181,7 @@ static void frSkyHubWriteByteInternal(const char data)
 static void sendAccel(void)
 {
     for (unsigned i = 0; i < 3; i++) {
-        frSkyHubWriteFrame(ID_ACC_X + i, ((int16_t)(acc.accADC[i] * acc.dev.acc_1G_rec) * 1000));
+        frSkyHubWriteFrame(ID_ACC_X + i, ((int16_t)(acc.accADC.v[i] * acc.dev.acc_1G_rec) * 1000));
     }
 }
 #endif
@@ -189,18 +192,18 @@ static void sendThrottleOrBatterySizeAsRpm(void)
 #if defined(USE_ESC_SENSOR_TELEMETRY)
     escSensorData_t *escData = getEscSensorData(ESC_SENSOR_COMBINED);
     if (escData) {
-        data = escData->dataAge < ESC_DATA_INVALID ? (calcEscRpm(escData->rpm) / 10) : 0;
+        data = escData->dataAge < ESC_DATA_INVALID ? lrintf(erpmToRpm(escData->rpm) / 10.0f) : 0;
     }
 #else
     if (ARMING_FLAG(ARMED)) {
         const throttleStatus_e throttleStatus = calculateThrottleStatus();
-        uint16_t throttleForRPM = rcCommand[THROTTLE] / BLADE_NUMBER_DIVIDER;
+        uint16_t throttleForRPM = rcThrottleToUs(rcCommand[THROTTLE]) / BLADE_NUMBER_DIVIDER;
         if (throttleStatus == THROTTLE_LOW && featureIsEnabled(FEATURE_MOTOR_STOP)) {
             throttleForRPM = 0;
         }
         data = throttleForRPM;
     } else {
-        data = (batteryConfig()->batteryCapacity / BLADE_NUMBER_DIVIDER);
+        data = (currentBatteryProfile->batteryCapacity / BLADE_NUMBER_DIVIDER);
     }
 #endif
 
@@ -216,9 +219,9 @@ static void sendTemperature1(void)
         data = escData->dataAge < ESC_DATA_INVALID ? escData->temperature : 0;
     }
 #elif defined(USE_BARO)
-    data = (baro.baroTemperature + 50)/ 100; // Airmamaf
+    data = lrintf(baro.temperature / 100.0f); // Airmamaf
 #else
-    data = gyroGetTemperature() / 10;
+    data = lrintf(gyroGetTemperature() / 10.0f);
 #endif
     frSkyHubWriteFrame(ID_TEMPRATURE1, data);
 }
@@ -240,7 +243,7 @@ static void GPStoDDDMM_MMMM(int32_t mwiigps, gpsCoordinateDDDMMmmmm_t *result)
 {
     int32_t absgps, deg, min;
 
-    absgps = ABS(mwiigps);
+    absgps = abs(mwiigps);
     deg    = absgps / GPS_DEGREES_DIVIDER;
     absgps = (absgps - deg * GPS_DEGREES_DIVIDER) * 60;        // absgps = Minutes left * 10^7
     min    = absgps / GPS_DEGREES_DIVIDER;                     // minutes left
@@ -285,15 +288,12 @@ static void sendSatalliteSignalQualityAsTemperature2(uint8_t cycleNum)
 {
     uint16_t satellite = gpsSol.numSat;
 
-    if (gpsSol.hdop > GPS_BAD_QUALITY && ( (cycleNum % 16 ) < 8)) { // Every 1s
-        satellite = constrain(gpsSol.hdop, 0, GPS_MAX_HDOP_VAL);
+    if (gpsSol.dop.pdop > GPS_BAD_QUALITY && ( (cycleNum % 16 ) < 8)) { // Every 1s
+        satellite = constrain(gpsSol.dop.pdop, 0, GPS_MAX_DOP_VAL);
     }
     int16_t data;
     if (telemetryConfig()->frsky_unit == UNIT_IMPERIAL) {
-        float tmp = (satellite - 32) / 1.8f;
-        // Round the value
-        tmp += (tmp < 0) ? -0.5f : 0.5f;
-        data = tmp;
+        data = lrintf((satellite - 32) / 1.8f);
     } else {
         data = satellite;
     }
@@ -324,12 +324,12 @@ static void sendFakeLatLong(void)
 
 static void sendGPSLatLong(void)
 {
-    static uint8_t gpsFixOccured = 0;
+    static uint8_t gpsFixOccurred = 0;
     int32_t coord[2] = {0,0};
 
-    if (STATE(GPS_FIX) || gpsFixOccured == 1) {
+    if (STATE(GPS_FIX) || gpsFixOccurred == 1) {
         // If we have ever had a fix, send the last known lat/long
-        gpsFixOccured = 1;
+        gpsFixOccurred = 1;
         coord[GPS_LATITUDE] = gpsSol.llh.lat;
         coord[GPS_LONGITUDE] = gpsSol.llh.lon;
         sendLatLong(coord);
@@ -420,7 +420,7 @@ static void sendAmperage(void)
 static void sendFuelLevel(void)
 {
     int16_t data;
-    if (batteryConfig()->batteryCapacity > 0) {
+    if (currentBatteryProfile->batteryCapacity > 0) {
         data = (uint16_t)calculateBatteryPercentageRemaining();
     } else {
         data = (uint16_t)constrain(getMAhDrawn(), 0, 0xFFFF);
@@ -450,9 +450,9 @@ static void sendHeading(void)
 bool initFrSkyHubTelemetry(void)
 {
     if (telemetryState == TELEMETRY_STATE_UNINITIALIZED) {
-        portConfig = findSerialPortConfig(FUNCTION_TELEMETRY_FRSKY_HUB);
-        if (portConfig) {
-            frSkyHubPortSharing = determinePortSharing(portConfig, FUNCTION_TELEMETRY_FRSKY_HUB);
+        telemetryPort = telemetryProviderPort(TELEMETRY_PROTOCOL_FRSKY_HUB);
+        if (telemetryPort != SERIAL_PORT_NONE) {
+            frSkyHubPortSharing = determinePortSharing(telemetryPort, FUNCTION_TELEMETRY_FRSKY_HUB);
 
             frSkyHubWriteByte = frSkyHubWriteByteInternal;
 
@@ -478,7 +478,7 @@ bool initFrSkyHubTelemetryExternal(frSkyHubWriteByteFn *frSkyHubWriteByteExterna
     return false;
 }
 
-void freeFrSkyHubTelemetryPort(void)
+static void freeFrSkyHubTelemetryPort(void)
 {
     closeSerialPort(frSkyHubPort);
     frSkyHubPort = NULL;
@@ -486,15 +486,15 @@ void freeFrSkyHubTelemetryPort(void)
 
 static void configureFrSkyHubTelemetryPort(void)
 {
-    if (portConfig) {
-        frSkyHubPort = openSerialPort(portConfig->identifier, FUNCTION_TELEMETRY_FRSKY_HUB, NULL, NULL, FRSKY_HUB_BAUDRATE, FRSKY_HUB_INITIAL_PORT_MODE, telemetryConfig()->telemetry_inverted ? SERIAL_NOT_INVERTED : SERIAL_INVERTED);
+    if (telemetryPort != SERIAL_PORT_NONE) {
+        frSkyHubPort = openSerialPort(telemetryPort, FUNCTION_TELEMETRY_FRSKY_HUB, NULL, NULL, FRSKY_HUB_BAUDRATE, FRSKY_HUB_INITIAL_PORT_MODE, telemetryConfig()->telemetry_inverted ? SERIAL_NOT_INVERTED : SERIAL_INVERTED);
     }
 }
 
 void checkFrSkyHubTelemetryState(void)
 {
     if (telemetryState == TELEMETRY_STATE_INITIALIZED_SERIAL) {
-        if (telemetryCheckRxPortShared(portConfig, rxRuntimeState.serialrxProvider)) {
+        if (telemetryCheckRxPortShared(telemetryPort, rxRuntimeState.serialrxProvider)) {
             if (frSkyHubPort == NULL && telemetrySharedPort != NULL) {
                 frSkyHubPort = telemetrySharedPort;
             }

@@ -43,8 +43,10 @@ extern "C" {
 
     #include "config/config.h"
     #include "fc/runtime_config.h"
+    #include "fc/rc_modes.h"
 
     #include "flight/pid.h"
+    #include "flight/gps_rescue.h"
     #include "flight/imu.h"
 
     #include "io/gps.h"
@@ -56,6 +58,8 @@ extern "C" {
     #include "sensors/battery.h"
     #include "sensors/sensors.h"
     #include "sensors/acceleration.h"
+    #include "sensors/barometer.h"
+    #include "sensors/compass.h"
 
     #include "msp/msp_serial.h"
 
@@ -65,6 +69,9 @@ extern "C" {
 
     rssiSource_e rssiSource;
     bool airMode;
+    bool posHoldFailed;
+    baro_t baro;
+    mag_t mag;
 
     uint16_t testBatteryVoltage = 0;
     int32_t testAmperage = 0;
@@ -79,6 +86,7 @@ extern "C" {
     PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 0);
     PG_REGISTER(rxConfig_t, rxConfig, PG_RX_CONFIG, 0);
     PG_REGISTER(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 0);
+    PG_REGISTER(gpsRescueConfig_t, gpsRescueConfig, PG_GPS_RESCUE, 0);
 }
 
 #include "unittest_macros.h"
@@ -226,6 +234,7 @@ TEST(TelemetryCrsfTest, TestFlightMode)
     ENABLE_STATE(GPS_FIX_HOME);
 
     airMode = false;
+    posHoldFailed = false;
 
     DISABLE_ARMING_FLAG(ARMED);
 
@@ -264,13 +273,61 @@ TEST(TelemetryCrsfTest, TestFlightMode)
     EXPECT_EQ(CRSF_SYNC_BYTE, frame[0]); // address
     EXPECT_EQ(7, frame[1]); // length
     EXPECT_EQ(0x21, frame[2]); // type
-    EXPECT_EQ('S', frame[3]);
-    EXPECT_EQ('T', frame[4]);
-    EXPECT_EQ('A', frame[5]);
-    EXPECT_EQ('B', frame[6]);
+    EXPECT_EQ('A', frame[3]);
+    EXPECT_EQ('N', frame[4]);
+    EXPECT_EQ('G', frame[5]);
+    EXPECT_EQ('L', frame[6]);
     EXPECT_EQ(0, frame[7]);
     EXPECT_EQ(crfsCrc(frame, frameLen), frame[8]);
 
+    // Altitude Hold forces Angle mode on, so ALTH must still win over ANGL
+    enableFlightMode(ALT_HOLD_MODE);
+    EXPECT_EQ(ANGLE_MODE, FLIGHT_MODE(ANGLE_MODE));
+    frameLen = getCrsfFrame(frame, CRSF_FRAMETYPE_FLIGHT_MODE);
+    EXPECT_EQ(5 + FRAME_HEADER_FOOTER_LEN, frameLen);
+    EXPECT_EQ(CRSF_SYNC_BYTE, frame[0]); // address
+    EXPECT_EQ(7, frame[1]); // length
+    EXPECT_EQ(0x21, frame[2]); // type
+    EXPECT_EQ('A', frame[3]);
+    EXPECT_EQ('L', frame[4]);
+    EXPECT_EQ('T', frame[5]);
+    EXPECT_EQ('H', frame[6]);
+    EXPECT_EQ(0, frame[7]);
+    EXPECT_EQ(crfsCrc(frame, frameLen), frame[8]);
+
+    // Position Hold likewise, and it outranks both Altitude Hold and Angle
+    enableFlightMode(POS_HOLD_MODE);
+    EXPECT_EQ(ANGLE_MODE, FLIGHT_MODE(ANGLE_MODE));
+    EXPECT_EQ(ALT_HOLD_MODE, FLIGHT_MODE(ALT_HOLD_MODE));
+    frameLen = getCrsfFrame(frame, CRSF_FRAMETYPE_FLIGHT_MODE);
+    EXPECT_EQ(5 + FRAME_HEADER_FOOTER_LEN, frameLen);
+    EXPECT_EQ(CRSF_SYNC_BYTE, frame[0]); // address
+    EXPECT_EQ(7, frame[1]); // length
+    EXPECT_EQ(0x21, frame[2]); // type
+    EXPECT_EQ('P', frame[3]);
+    EXPECT_EQ('O', frame[4]);
+    EXPECT_EQ('S', frame[5]);
+    EXPECT_EQ('H', frame[6]);
+    EXPECT_EQ(0, frame[7]);
+    EXPECT_EQ(crfsCrc(frame, frameLen), frame[8]);
+
+    // a Position Hold that has failed reports PHFL in place of POSH
+    posHoldFailed = true;
+    frameLen = getCrsfFrame(frame, CRSF_FRAMETYPE_FLIGHT_MODE);
+    EXPECT_EQ(5 + FRAME_HEADER_FOOTER_LEN, frameLen);
+    EXPECT_EQ(CRSF_SYNC_BYTE, frame[0]); // address
+    EXPECT_EQ(7, frame[1]); // length
+    EXPECT_EQ(0x21, frame[2]); // type
+    EXPECT_EQ('P', frame[3]);
+    EXPECT_EQ('H', frame[4]);
+    EXPECT_EQ('F', frame[5]);
+    EXPECT_EQ('L', frame[6]);
+    EXPECT_EQ(0, frame[7]);
+    EXPECT_EQ(crfsCrc(frame, frameLen), frame[8]);
+    posHoldFailed = false;
+
+    disableFlightMode(POS_HOLD_MODE);
+    disableFlightMode(ALT_HOLD_MODE);
     disableFlightMode(ANGLE_MODE);
     enableFlightMode(HORIZON_MODE);
     EXPECT_EQ(HORIZON_MODE, FLIGHT_MODE(HORIZON_MODE));
@@ -332,45 +389,55 @@ serialPort_t *openSerialPort(serialPortIdentifier_e, serialPortFunction_e, seria
 void closeSerialPort(serialPort_t *) {}
 bool isSerialTransmitBufferEmpty(const serialPort_t *) { return true; }
 
-const serialPortConfig_t *findSerialPortConfig(serialPortFunction_e) {return NULL;}
 
 bool telemetryDetermineEnabledState(portSharing_e) {return true;}
-bool telemetryCheckRxPortShared(const serialPortConfig_t *, SerialRXType) {return true;}
+bool telemetryCheckRxPortShared(serialPortIdentifier_e, SerialRXType) {return true;}
 bool telemetryIsSensorEnabled(sensor_e) {return true;}
 
-portSharing_e determinePortSharing(const serialPortConfig_t *, serialPortFunction_e) {return PORTSHARING_NOT_SHARED;}
+portSharing_e determinePortSharing(serialPortIdentifier_e, serialPortFunction_e) {return PORTSHARING_NOT_SHARED;}
 
-bool airmodeIsEnabled(void) {return airMode;}
+bool isAirmodeEnabled(void) {return airMode;}
+bool posHoldFailure(void) {return posHoldFailed;}
 
-int32_t getAmperage(void) {
+int32_t getAmperage(void)
+{
     return testAmperage;
 }
 
-uint16_t getBatteryVoltage(void) {
+uint16_t getBatteryVoltage(void)
+{
     return testBatteryVoltage;
 }
 
-uint16_t getLegacyBatteryVoltage(void) {
+uint16_t getLegacyBatteryVoltage(void)
+{
     return (testBatteryVoltage + 5) / 10;
 }
 
-uint16_t getBatteryAverageCellVoltage(void) {
+uint16_t getBatteryAverageCellVoltage(void)
+{
     return 0;
 }
 
-batteryState_e getBatteryState(void) {
+batteryState_e getBatteryState(void)
+{
     return BATTERY_OK;
 }
 
-uint8_t calculateBatteryPercentageRemaining(void) {
+uint8_t calculateBatteryPercentageRemaining(void)
+{
     return 67;
 }
 
-int32_t getEstimatedAltitudeCm(void) {
-	return gpsSol.llh.altCm;    // function returns cm not m.
+int32_t getEstimatedAltitudeCm(void)
+{
+    return gpsSol.llh.altCm;    // function returns cm not m.
 }
-    
-int32_t getMAhDrawn(void){
+
+int16_t getEstimatedVario(void) { return 0; }
+
+int32_t getMAhDrawn(void)
+{
   return testmAhDrawn;
 }
 
@@ -379,4 +446,6 @@ bool handleMspFrame(uint8_t *, uint8_t, uint8_t *)  { return false; }
 bool isBatteryVoltageConfigured(void) { return true; }
 bool isAmperageConfigured(void) { return true; }
 timeUs_t rxFrameTimeUs(void) { return 0; }
+bool IS_RC_MODE_ACTIVE(boxId_e) { return false; }
+bool gpsRescueIsConfigured(void) { return false; }
 }

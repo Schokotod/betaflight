@@ -23,6 +23,8 @@
 
 #include "platform.h"
 
+#include "io/serial.h"
+#include "scheduler/scheduler.h"
 #include "serial.h"
 
 void serialPrint(serialPort_t *instance, const char *str)
@@ -43,17 +45,16 @@ void serialWrite(serialPort_t *instance, uint8_t ch)
     instance->vTable->serialWrite(instance, ch);
 }
 
-
-void serialWriteBuf(serialPort_t *instance, const uint8_t *data, int count)
+void serialWriteBufNoFlush(serialPort_t *instance, const uint8_t *data, int count)
 {
     if (instance->vTable->writeBuf) {
         instance->vTable->writeBuf(instance, data, count);
     } else {
+        // The transmit buffer is large enough to hold any single message, so only wait once
+        while (serialTxBytesFree(instance) < (uint32_t)count) {
+        };
+
         for (const uint8_t *p = data; count > 0; count--, p++) {
-
-            while (!serialTxBytesFree(instance)) {
-            };
-
             serialWrite(instance, *p);
         }
     }
@@ -76,7 +77,10 @@ uint8_t serialRead(serialPort_t *instance)
 
 void serialSetBaudRate(serialPort_t *instance, uint32_t baudRate)
 {
-    instance->vTable->serialSetBaudRate(instance, baudRate);
+    //vTable->serialSetBaudRate is NULL for simulator builds, because the TCP port is used
+    if (instance->vTable->serialSetBaudRate != NULL) {
+        instance->vTable->serialSetBaudRate(instance, baudRate);
+    }
 }
 
 bool isSerialTransmitBufferEmpty(const serialPort_t *instance)
@@ -87,6 +91,20 @@ bool isSerialTransmitBufferEmpty(const serialPort_t *instance)
 void serialSetMode(serialPort_t *instance, portMode_e mode)
 {
     instance->vTable->setMode(instance, mode);
+}
+
+void serialSetIdleCallback(serialPort_t *instance, serialIdleCallbackPtr callback)
+{
+    if (!instance) {
+        return;
+    }
+#ifdef USE_PLATFORM_UART_IDLE_CALLBACK
+    if (instance->vTable->setIdleCallback) {
+        instance->vTable->setIdleCallback(instance, callback);
+        return;
+    }
+#endif
+    instance->idleCallback = callback;
 }
 
 void serialSetCtrlLineStateCb(serialPort_t *serialPort, void (*cb)(void *context, uint16_t ctrlLineState), void *context)
@@ -107,11 +125,6 @@ void serialSetBaudRateCb(serialPort_t *serialPort, void (*cb)(serialPort_t *cont
     }
 }
 
-void serialWriteBufShim(void *instance, const uint8_t *data, int count)
-{
-    serialWriteBuf((serialPort_t *)instance, data, count);
-}
-
 void serialBeginWrite(serialPort_t *instance)
 {
     if (instance->vTable->beginWrite)
@@ -123,3 +136,31 @@ void serialEndWrite(serialPort_t *instance)
     if (instance->vTable->endWrite)
         instance->vTable->endWrite(instance);
 }
+
+void serialWriteBuf(serialPort_t *instance, const uint8_t *data, int count)
+{
+    serialBeginWrite(instance);
+    serialWriteBufNoFlush(instance, data, count);
+    serialEndWrite(instance);
+}
+
+void serialWriteBufBlocking(serialPort_t *instance, const uint8_t *data, int count)
+{
+    while (serialTxBytesFree(instance) < (uint32_t)count) {
+        // Waiting on TX backpressure is not task execution time.
+        schedulerIgnoreTaskExecTime();
+    }
+    serialWriteBuf(instance, data, count);
+}
+
+void serialWriteBufShim(void *instance, const uint8_t *data, int count)
+{
+    serialWriteBuf((serialPort_t *)instance, data, count);
+}
+
+void serialWriteBufBlockingShim(void *instance, const uint8_t *data, int count)
+{
+    serialWriteBufBlocking(instance, data, count);
+}
+
+

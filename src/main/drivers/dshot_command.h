@@ -45,6 +45,8 @@ typedef enum {
     DSHOT_CMD_3D_MODE_ON,
     DSHOT_CMD_SETTINGS_REQUEST, // Currently not implemented
     DSHOT_CMD_SAVE_SETTINGS,
+    DSHOT_CMD_EXTENDED_TELEMETRY_ENABLE,
+    DSHOT_CMD_EXTENDED_TELEMETRY_DISABLE,
     DSHOT_CMD_SPIN_DIRECTION_NORMAL = 20,
     DSHOT_CMD_SPIN_DIRECTION_REVERSED = 21,
     DSHOT_CMD_LED0_ON, // BLHeli32 only
@@ -69,6 +71,6 @@ void dshotCommandWrite(uint8_t index, uint8_t motorCount, uint8_t command, dshot
 void dshotSetPidLoopTime(uint32_t pidLoopTime);
 bool dshotCommandQueueEmpty(void);
 bool dshotCommandIsProcessing(void);
-uint8_t dshotCommandGetCurrent(uint8_t index);
-bool dshotCommandOutputIsEnabled(uint8_t motorCount);
+uint8_t dshotCommandGetCurrent(unsigned index);
+bool dshotCommandOutputIsEnabled(unsigned motorCount);
 bool dshotStreamingCommandsAreEnabled(void);

@@ -25,20 +25,26 @@
 
 #include "pg/pg.h"
 
-#define MAX_NAME_LENGTH 16u
-
 typedef enum {
-    CONFIGURATION_STATE_DEFAULTS_BARE = 0,
-    CONFIGURATION_STATE_DEFAULTS_CUSTOM,
+    CONFIGURATION_STATE_UNCONFIGURED = 0,
     CONFIGURATION_STATE_CONFIGURED,
 } configurationState_e;
 
-typedef struct pilotConfig_s {
-    char name[MAX_NAME_LENGTH + 1];
-    char displayName[MAX_NAME_LENGTH + 1];
-} pilotConfig_t;
-
-PG_DECLARE(pilotConfig_t, pilotConfig);
+typedef enum {
+    CONFIG_RESET_NONE = 0,
+    CONFIG_RESET_EMPTY,
+    CONFIG_RESET_CORRUPT,
+    CONFIG_RESET_VERSION,
+    CONFIG_RESET_PG_MISSING,
+    CONFIG_RESET_PG_VERSION,
+    CONFIG_RESET_BOARD,
+    CONFIG_RESET_CLI,
+    CONFIG_RESET_MSP,
+    CONFIG_RESET_BUTTON,
+    CONFIG_RESET_SERIAL,
+    CONFIG_RESET_PG_SIZE,
+    CONFIG_RESET_COUNT
+} configResetReason_e;
 
 typedef struct systemConfig_s {
     uint8_t pidProfileIndex;
@@ -52,6 +58,9 @@ typedef struct systemConfig_s {
     uint8_t hseMhz;                 // Only used for F4 and G4 targets
     uint8_t configurationState;     // The state of the configuration (defaults / configured)
     uint8_t enableStickArming; // boolean that determines whether stick arming can be used
+    uint8_t activeBatteryProfile;
+    uint8_t configResetReason;
+    uint16_t configResetDetail;     // stored EEPROM version or pgn, depending on configResetReason
 } systemConfig_t;
 
 PG_DECLARE(systemConfig_t, systemConfig);
@@ -60,7 +69,8 @@ struct pidProfile_s;
 extern struct pidProfile_s *currentPidProfile;
 
 void initEEPROM(void);
-bool resetEEPROM(bool useCustomDefaults);
+bool resetEEPROM(configResetReason_e reason, uint16_t detail);
+void resetEEPROMOnLoadFault(void);
 bool readEEPROM(void);
 void writeEEPROM(void);
 void writeUnmodifiedConfigToEEPROM(void);
@@ -68,6 +78,9 @@ void ensureEEPROMStructureIsValid(void);
 
 void saveConfigAndNotify(void);
 void validateAndFixGyroConfig(void);
+#ifdef USE_BLACKBOX
+void validateAndFixBlackBox(void);
+#endif
 
 void setConfigDirty(void);
 bool isConfigDirty(void);
@@ -79,14 +92,17 @@ void changePidProfileFromCellCount(uint8_t cellCount);
 uint8_t getCurrentControlRateProfileIndex(void);
 void changeControlRateProfile(uint8_t profileIndex);
 
-bool canSoftwareSerialBeUsed(void);
+uint8_t getCurrentBatteryProfileIndex(void);
+void changeBatteryProfile(uint8_t profileIndex);
 
-uint16_t getCurrentMinthrottle(void);
+bool canSoftwareSerialBeUsed(void);
 
 void resetConfig(void);
 void targetConfiguration(void);
 void targetValidateConfiguration(void);
+void configTargetPreInit(void);
 
 bool isSystemConfigured(void);
 void setRebootRequired(void);
 bool getRebootRequired(void);
+bool isEepromWriteInProgress(void);

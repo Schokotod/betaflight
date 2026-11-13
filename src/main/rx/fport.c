@@ -48,14 +48,12 @@
 #include "rx/sbus_channels.h"
 #include "rx/fport.h"
 
-
 #define FPORT_TIME_NEEDED_PER_FRAME_US 3000
 #define FPORT_MAX_TELEMETRY_RESPONSE_DELAY_US 2000
 #define FPORT_MIN_TELEMETRY_RESPONSE_DELAY_US 500
 #define FPORT_MAX_TELEMETRY_AGE_MS 500
 
 #define FPORT_TELEMETRY_MAX_CONSECUTIVE_TELEMETRY_FRAMES 2
-
 
 #define FPORT_FRAME_MARKER 0x7E
 
@@ -150,13 +148,14 @@ static serialPort_t *fportPort;
 static bool telemetryEnabled = false;
 #endif
 
-static void reportFrameError(uint8_t errorReason) {
+static void reportFrameError(uint8_t errorReason)
+{
     static volatile uint16_t frameErrors = 0;
 
     frameErrors++;
 
-    DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_FRAME_ERRORS, frameErrors);
-    DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_FRAME_LAST_ERROR, errorReason);
+    DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_FRAME_ERRORS, frameErrors);      //!< Frame Error Count
+    DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_FRAME_LAST_ERROR, errorReason);  //!< Last Frame Error Reason
 }
 
 // Receive ISR callback
@@ -195,7 +194,7 @@ static void fportDataReceive(uint16_t c, void *data)
                 telemetryFrame = false;
             }
 
-            DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_FRAME_INTERVAL, currentTimeUs - lastFrameReceivedUs);
+            DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_FRAME_INTERVAL, currentTimeUs - lastFrameReceivedUs);  //!< Frame Interval [unit:us]
             lastFrameReceivedUs = currentTimeUs;
 
             escapedCharacter = false;
@@ -253,7 +252,6 @@ static uint8_t fportFrameStatus(rxRuntimeState_t *rxRuntimeState)
 #endif
 
     uint8_t result = RX_FRAME_PENDING;
-
 
     if (rxBufferReadIndex != rxBufferWriteIndex) {
         uint8_t bufferLength = rxBuffer[rxBufferReadIndex].length;
@@ -374,7 +372,7 @@ static bool fportProcessFrame(const rxRuntimeState_t *rxRuntimeState)
             clearToSend = false;
         }
 
-        DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_TELEMETRY_INTERVAL, currentTimeUs - lastTelemetryFrameSentUs);
+        DEBUG_SET(DEBUG_FPORT, DEBUG_FPORT_TELEMETRY_INTERVAL, currentTimeUs - lastTelemetryFrameSentUs);  //!< Telemetry Frame Interval [unit:us]
         lastTelemetryFrameSentUs = currentTimeUs;
     }
 
@@ -391,18 +389,15 @@ bool fportRxInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
     sbusChannelsInit(rxConfig, rxRuntimeState);
 
     rxRuntimeState->channelCount = SBUS_MAX_CHANNEL;
-    rxRuntimeState->rxRefreshRate = 11000;
-
     rxRuntimeState->rcFrameStatusFn = fportFrameStatus;
     rxRuntimeState->rcProcessFrameFn = fportProcessFrame;
-    rxRuntimeState->rcFrameTimeUsFn = rxFrameTimeUs;
 
-    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
-    if (!portConfig) {
+    const serialPortIdentifier_e port = rxConfig->rx_uart;
+    if (port == SERIAL_PORT_NONE) {
         return false;
     }
 
-    fportPort = openSerialPort(portConfig->identifier,
+    fportPort = openSerialPort(port,
         FUNCTION_RX_SERIAL,
         fportDataReceive,
         NULL,

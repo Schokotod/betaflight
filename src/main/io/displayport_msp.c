@@ -40,26 +40,31 @@
 #include "msp/msp_protocol.h"
 #include "msp/msp_serial.h"
 
+#include "osd/osd.h"
+
 #include "pg/vcd.h"
 
 static displayPort_t mspDisplayPort;
+static serialPortIdentifier_e displayPortSerial;
+
+typedef struct displayPortMspCommand_s {
+    uint8_t command;
+    uint8_t row;
+    uint8_t col;
+    uint8_t attribute;
+    uint8_t data[OSD_CHAR_BYTES];
+} __attribute__((packed)) displayPortMspCommand_t;
 
 static int output(displayPort_t *displayPort, uint8_t cmd, uint8_t *buf, int len)
 {
     UNUSED(displayPort);
 
-#ifdef USE_CLI
-    // FIXME There should be no dependency on the CLI but mspSerialPush doesn't check for cli mode, and can't because it also shouldn't have a dependency on the CLI.
-    if (cliMode) {
-        return 0;
-    }
-#endif
-    return mspSerialPush(displayPortProfileMsp()->displayPortSerial, cmd, buf, len, MSP_DIRECTION_REPLY);
+    return mspSerialPush(displayPortSerial, cmd, buf, len, MSP_DIRECTION_REPLY, MSP_V1);
 }
 
 static int heartbeat(displayPort_t *displayPort)
 {
-    uint8_t subcmd[] = { 0 };
+    uint8_t subcmd[] = { MSP_DP_HEARTBEAT };
 
     // heartbeat is used to:
     // a) ensure display is not released by MW OSD software
@@ -76,7 +81,7 @@ static int grab(displayPort_t *displayPort)
 
 static int release(displayPort_t *displayPort)
 {
-    uint8_t subcmd[] = { 1 };
+    uint8_t subcmd[] = { MSP_DP_RELEASE };
 
     return output(displayPort, MSP_DISPLAYPORT, subcmd, sizeof(subcmd));
 }
@@ -85,14 +90,14 @@ static int clearScreen(displayPort_t *displayPort, displayClearOption_e options)
 {
     UNUSED(options);
 
-    uint8_t subcmd[] = { 2 };
+    uint8_t subcmd[] = { MSP_DP_CLEAR_SCREEN };
 
     return output(displayPort, MSP_DISPLAYPORT, subcmd, sizeof(subcmd));
 }
 
 static bool drawScreen(displayPort_t *displayPort)
 {
-    uint8_t subcmd[] = { 4 };
+    uint8_t subcmd[] = { MSP_DP_DRAW_SCREEN };
     output(displayPort, MSP_DISPLAYPORT, subcmd, sizeof(subcmd));
 
     return 0;
@@ -113,12 +118,12 @@ static int writeString(displayPort_t *displayPort, uint8_t col, uint8_t row, uin
         len = MSP_OSD_MAX_STRING_LENGTH;
     }
 
-    buf[0] = 3;
+    buf[0] = MSP_DP_WRITE_STRING;
     buf[1] = row;
     buf[2] = col;
-    buf[3] = displayPortProfileMsp()->attrValues[attr] & ~DISPLAYPORT_MSP_ATTR_BLINK & DISPLAYPORT_MSP_ATTR_MASK;
+    buf[3] = displayPortProfileMsp()->fontSelection[attr & (DISPLAYPORT_SEVERITY_COUNT - 1)] & DISPLAYPORT_MSP_ATTR_FONT;
 
-    if (attr & DISPLAYPORT_ATTR_BLINK) {
+    if (attr & DISPLAYPORT_BLINK) {
         buf[3] |= DISPLAYPORT_MSP_ATTR_BLINK;
     }
 
@@ -127,13 +132,25 @@ static int writeString(displayPort_t *displayPort, uint8_t col, uint8_t row, uin
     return output(displayPort, MSP_DISPLAYPORT, buf, len + 4);
 }
 
+static int writeSys(displayPort_t *displayPort, uint8_t col, uint8_t row, displayPortSystemElement_e systemElement)
+{
+    uint8_t syscmd[4];
+
+    syscmd[0] = MSP_DP_SYS;
+    syscmd[1] = row;
+    syscmd[2] = col;
+    syscmd[3] = systemElement;
+
+    return output(displayPort, MSP_DISPLAYPORT, syscmd, sizeof(syscmd));
+}
+
 static int writeChar(displayPort_t *displayPort, uint8_t col, uint8_t row, uint8_t attr, uint8_t c)
 {
     char buf[2];
 
     buf[0] = c;
     buf[1] = 0;
-    return writeString(displayPort, col, row, attr, buf); //!!TODO - check if there is a direct MSP command to do this
+    return writeString(displayPort, col, row, attr, buf);
 }
 
 static bool isTransferInProgress(const displayPort_t *displayPort)
@@ -150,9 +167,6 @@ static bool isSynced(const displayPort_t *displayPort)
 
 static void redraw(displayPort_t *displayPort)
 {
-    const uint8_t displayRows = (vcdProfile()->video_system == VIDEO_SYSTEM_PAL) ? 16 : 13;
-    displayPort->rows = displayRows + displayPortProfileMsp()->rowAdjust;
-    displayPort->cols = 30 + displayPortProfileMsp()->colAdjust;
     drawScreen(displayPort);
 }
 
@@ -162,12 +176,51 @@ static uint32_t txBytesFree(const displayPort_t *displayPort)
     return mspSerialTxBytesFree();
 }
 
+#ifdef USE_MSP_DISPLAYPORT_FONT
+static bool writeFontCharacter(displayPort_t *displayPort, uint16_t addr, const osdCharacter_t *chr)
+{
+    displayPortMspCommand_t displayPortCommand;
+
+    if (!chr) {
+        return false;
+    }
+
+    displayPortCommand.command = MSP_DP_FONTCHAR_WRITE;
+    displayPortCommand.row = addr & 0xff;
+    displayPortCommand.col = (addr >> 8) & 0xff;
+    displayPortCommand.attribute = 0;
+
+    memcpy(displayPortCommand.data, chr->data, OSD_CHAR_BYTES);
+
+    int res = output(displayPort, MSP_DISPLAYPORT, (uint8_t*)&displayPortCommand, OSD_CHAR_BYTES + 4);
+
+    // 80ms delay needed to ensure the MSP display has enough time to process the font data
+    delay(80);
+
+    return res > 0;
+}
+
+static bool checkReady(displayPort_t *displayPort, bool rescan)
+{
+    UNUSED(rescan);
+    if (
+        !displayPort ||
+        displayPort->deviceType != DISPLAYPORT_DEVICE_TYPE_MSP
+    ) {
+        return false;
+    }
+
+    return true;
+}
+#endif
+
 static const displayPortVTable_t mspDisplayPortVTable = {
     .grab = grab,
     .release = release,
     .clearScreen = clearScreen,
     .drawScreen = drawScreen,
     .screenSize = screenSize,
+    .writeSys = writeSys,
     .writeString = writeString,
     .writeChar = writeChar,
     .isTransferInProgress = isTransferInProgress,
@@ -175,6 +228,10 @@ static const displayPortVTable_t mspDisplayPortVTable = {
     .redraw = redraw,
     .isSynced = isSynced,
     .txBytesFree = txBytesFree,
+#ifdef USE_MSP_DISPLAYPORT_FONT
+    .writeFontCharacter = writeFontCharacter,
+    .checkReady = checkReady,
+#endif
     .layerSupported = NULL,
     .layerSelect = NULL,
     .layerCopy = NULL,
@@ -188,7 +245,37 @@ displayPort_t *displayPortMspInit(void)
         mspDisplayPort.useDeviceBlink = true;
     }
 
+#ifndef USE_OSD_SD
+    if (vcdProfile()->video_system != VIDEO_SYSTEM_HD) {
+        vcdProfileMutable()->video_system = VIDEO_SYSTEM_HD;
+    }
+#endif
+#ifndef USE_OSD_HD
+    if (vcdProfile()->video_system == VIDEO_SYSTEM_HD) {
+        vcdProfileMutable()->video_system = VIDEO_SYSTEM_AUTO;
+    }
+#endif
+
+    if (vcdProfile()->video_system == VIDEO_SYSTEM_HD) {
+        mspDisplayPort.rows = osdConfig()->canvas_rows;
+        mspDisplayPort.cols = osdConfig()->canvas_cols;
+    } else {
+        const uint8_t displayRows = (vcdProfile()->video_system == VIDEO_SYSTEM_PAL) ? VIDEO_LINES_PAL : VIDEO_LINES_NTSC;
+        mspDisplayPort.rows = displayRows + displayPortProfileMsp()->rowAdjust;
+        mspDisplayPort.cols = OSD_SD_COLS + displayPortProfileMsp()->colAdjust;
+    }
+
     redraw(&mspDisplayPort);
+
     return &mspDisplayPort;
+}
+
+void displayPortMspSetSerial(serialPortIdentifier_e serialPort)
+{
+    displayPortSerial = serialPort;
+}
+
+serialPortIdentifier_e displayPortMspGetSerial(void) {
+    return displayPortSerial;
 }
 #endif // USE_MSP_DISPLAYPORT

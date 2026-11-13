@@ -29,6 +29,8 @@
 #include "config/config.h"
 #include "config/feature.h"
 
+#include "drivers/barometer/barometer_spa06_probe.h"
+
 #include "fc/runtime_config.h"
 
 #include "flight/pid.h"
@@ -45,13 +47,16 @@
 #include "sensors/initialisation.h"
 #include "sensors/rangefinder.h"
 #include "sensors/sensors.h"
+#include "sensors/opticalflow.h"
+#include "sensors/pitot.h"
 
-// requestedSensors is not actually used
-uint8_t requestedSensors[SENSOR_INDEX_COUNT] = { GYRO_NONE, ACC_NONE, BARO_NONE, MAG_NONE, RANGEFINDER_NONE };
-uint8_t detectedSensors[SENSOR_INDEX_COUNT] = { GYRO_NONE, ACC_NONE, BARO_NONE, MAG_NONE, RANGEFINDER_NONE };
+uint8_t detectedSensors[SENSOR_INDEX_COUNT] = { GYRO_NONE, ACC_NONE, BARO_NONE, MAG_NONE, RANGEFINDER_NONE, OPTICALFLOW_NONE, PITOT_NONE};
+uint8_t detectedGyros[GYRO_COUNT];
 
 void sensorsPreInit(void)
 {
+    memset(detectedGyros, 0, sizeof(detectedGyros));
+
     gyroPreInit();
 
 #ifdef USE_MAG
@@ -76,16 +81,28 @@ bool sensorsAutodetect(void)
     }
 #endif
 
+#ifdef USE_BARO
+    baroInit();
+#endif
+
+#if ENABLE_BARO_SPA06_PROBE
+    spa06ProbeRun();
+#endif
+
 #ifdef USE_MAG
     compassInit();
 #endif
 
-#ifdef USE_BARO
-    baroDetect(&baro.dev, barometerConfig()->baro_hardware);
-#endif
-
 #ifdef USE_RANGEFINDER
     rangefinderInit();
+#endif
+
+#ifdef USE_OPTICALFLOW
+    opticalflowInit();
+#endif
+
+#ifdef USE_PITOT
+    pitotInit();
 #endif
 
 #ifdef USE_ADC_INTERNAL

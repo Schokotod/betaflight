@@ -24,6 +24,7 @@
 
 #include "platform.h"
 
+#include "common/crc.h"
 #include "common/maths.h"
 
 #include "pg.h"
@@ -77,8 +78,16 @@ bool pgLoad(const pgRegistry_t* reg, const void *from, int size, int version)
     pgResetInstance(reg, pgOffset(reg));
     // restore only matching version, keep defaults otherwise
     if (version == pgVersion(reg)) {
+        // An array group is stored as its elements laid end to end, so the element size is part of
+        // the record's layout: a record of another size would put every element after the first at
+        // the wrong offset. A single struct may still grow by appending fields, loading the old prefix.
+        if (reg->length > 1 && size != pgSize(reg)) {
+            return false;
+        }
         const int take = MIN(size, pgSize(reg));
         memcpy(pgOffset(reg), from, take);
+
+        *reg->fnv_hash = fnv_update(FNV_OFFSET_BASIS, from, take);
 
         return true;
     }

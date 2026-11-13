@@ -35,7 +35,6 @@
 
 #include "drivers/bus_spi.h"
 #include "drivers/io.h"
-#include "drivers/io_impl.h"
 #include "drivers/nvic.h"
 #include "drivers/rx/rx_sx127x.h"
 #include "drivers/rx/rx_spi.h"
@@ -106,7 +105,7 @@ bool sx127xInit(IO_t resetPin, IO_t busyPin)
     IOLo(resetPin);
     delay(50);
     IOConfigGPIO(resetPin, IOCFG_IN_FLOATING); // leave floating
-    
+
     return sx127xDetectChip();
 }
 
@@ -287,14 +286,17 @@ void sx127xStartReceiving(void)
     sx127xSetMode(SX127x_OPMODE_RXCONTINUOUS);
 }
 
-void sx127xConfig(const sx127xBandwidth_e bw, const sx127xSpreadingFactor_e sf, const sx127xCodingRate_e cr, 
-                  const uint32_t freq, const uint8_t preambleLen, const bool iqInverted)
+void sx127xConfig(const uint8_t bw, const uint8_t sfbt, const uint8_t cr,
+    const uint32_t freq, const uint8_t preambleLength, const bool iqInverted,
+    const uint32_t flrcSyncWord, const uint16_t flrcCrcSeed, const bool isFlrc)
 {
+    UNUSED(flrcSyncWord); UNUSED(flrcCrcSeed); UNUSED(isFlrc);
+
     sx127xConfigLoraDefaults(iqInverted);
-    sx127xSetPreambleLength(preambleLen);
+    sx127xSetPreambleLength(preambleLength);
     sx127xSetOutputPower(SX127x_MAX_POWER);
-    sx127xSetSpreadingFactor(sf);
-    sx127xSetBandwidthCodingRate(bw, cr, sf, false, false);
+    sx127xSetSpreadingFactor(sfbt);
+    sx127xSetBandwidthCodingRate(bw, cr, sfbt, false, false);
     sx127xSetFrequencyReg(freq);
 }
 
@@ -302,25 +304,25 @@ uint32_t sx127xGetCurrBandwidth(const sx127xBandwidth_e bw)
 {
     switch (bw) {
     case SX127x_BW_7_80_KHZ:
-        return 7.8E3;
+        return 7.8E3f;
     case SX127x_BW_10_40_KHZ:
-        return 10.4E3;
+        return 10.4E3f;
     case SX127x_BW_15_60_KHZ:
-        return 15.6E3;
+        return 15.6E3f;
     case SX127x_BW_20_80_KHZ:
-        return 20.8E3;
+        return 20.8E3f;
     case SX127x_BW_31_25_KHZ:
-        return 31.25E3;
+        return 31.25E3f;
     case SX127x_BW_41_70_KHZ:
-        return 41.7E3;
+        return 41.7E3f;
     case SX127x_BW_62_50_KHZ:
-        return 62.5E3;
+        return 62.5E3f;
     case SX127x_BW_125_00_KHZ:
-        return 125E3;
+        return 125E3f;
     case SX127x_BW_250_00_KHZ:
-        return 250E3;
+        return 250E3f;
     case SX127x_BW_500_00_KHZ:
-        return 500E3;
+        return 500E3f;
     }
     return -1;
 }
@@ -384,22 +386,22 @@ int32_t sx127xGetFrequencyError(const sx127xBandwidth_e bw)
     return fErrorHZ;
 }
 
-void sx127xAdjustFrequency(int32_t offset, const uint32_t freq)
+void sx127xAdjustFrequency(int32_t *offset, const uint32_t freq)
 {
     if (sx127xGetFrequencyErrorbool()) { //logic is flipped compared to original code
-        if (offset > SX127x_FREQ_CORRECTION_MIN) {
-            offset -= 1;
+        if (*offset > SX127x_FREQ_CORRECTION_MIN) {
+            *offset -= 1;
         } else {
-            offset = 0; //reset because something went wrong
+            *offset = 0; //reset because something went wrong
         }
     } else {
-        if (offset < SX127x_FREQ_CORRECTION_MAX) {
-            offset += 1;
+        if (*offset < SX127x_FREQ_CORRECTION_MAX) {
+            *offset += 1;
         } else {
-            offset = 0; //reset because something went wrong
+            *offset = 0; //reset because something went wrong
         }
     }
-    sx127xSetPPMoffsetReg(offset, freq); //as above but corrects a different PPM offset based on freq error
+    sx127xSetPPMoffsetReg(*offset, freq); //as above but corrects a different PPM offset based on freq error
 }
 
 uint8_t sx127xUnsignedGetLastPacketRSSI(void)
@@ -417,17 +419,16 @@ int8_t sx127xGetCurrRSSI(void)
     return (-157 + sx127xGetRegisterValue(SX127X_REG_RSSI_VALUE, 7, 0));
 }
 
-int8_t sx127xGetLastPacketSNR(void)
+int8_t sx127xGetLastPacketSNRRaw(void)
 {
-    int8_t rawSNR = (int8_t)sx127xGetRegisterValue(SX127X_REG_PKT_SNR_VALUE, 7, 0);
-    return (rawSNR / 4);
+    return (int8_t)sx127xGetRegisterValue(SX127X_REG_PKT_SNR_VALUE, 7, 0);
 }
 
 void sx127xGetLastPacketStats(int8_t *rssi, int8_t *snr)
 {
     *rssi = sx127xGetLastPacketRSSI();
-    *snr = sx127xGetLastPacketSNR();
-    int8_t negOffset = (*snr < 0) ? *snr : 0;
+    *snr = sx127xGetLastPacketSNRRaw();
+    int8_t negOffset = (*snr < 0) ? (*snr / 4) : 0;
     *rssi += negOffset;
 }
 

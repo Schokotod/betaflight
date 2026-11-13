@@ -29,6 +29,7 @@
 #include "build/atomic.h"
 #include "build/build_config.h"
 #include "build/version.h"
+#include "build/debug.h"
 
 #include "config/feature.h"
 #include "pg/pg.h"
@@ -68,11 +69,15 @@
 #define GHST_CYCLETIME_US                   100000      // 10x/sec
 #define GHST_FRAME_PACK_PAYLOAD_SIZE        10
 #define GHST_FRAME_GPS_PAYLOAD_SIZE         10
-#define GHST_FRAME_LENGTH_CRC               1
-#define GHST_FRAME_LENGTH_TYPE              1
+#define GHST_FRAME_MAGBARO_PAYLOAD_SIZE     10
+
+#define GHST_MSP_BUFFER_SIZE    96
+#define GHST_UL_MSP_FRAME_SIZE  10
+#define GHST_DL_MSP_FRAME_SIZE   6
+#define GHST_MSP_LENGTH_OFFSET   1
 
 static bool ghstTelemetryEnabled;
-static uint8_t ghstFrame[GHST_FRAME_SIZE_MAX];
+static uint8_t ghstFrame[GHST_FRAME_SIZE];
 
 static void ghstInitializeFrame(sbuf_t *dst)
 {
@@ -91,11 +96,11 @@ static void ghstFinalize(sbuf_t *dst)
 }
 
 // Battery (Pack) status
-void ghstFramePackTelemetry(sbuf_t *dst)
+static void ghstFramePackTelemetry(sbuf_t *dst)
 {
     // use sbufWrite since CRC does not include frame length
     sbufWriteU8(dst, GHST_FRAME_PACK_PAYLOAD_SIZE + GHST_FRAME_LENGTH_CRC + GHST_FRAME_LENGTH_TYPE);
-    sbufWriteU8(dst, 0x23);                     // GHST_DL_PACK_STAT
+    sbufWriteU8(dst, GHST_DL_PACK_STAT);
 
     if (telemetryConfig()->report_cell_voltage) {
         sbufWriteU16(dst, getBatteryAverageCellVoltage());      // units of 10mV
@@ -106,15 +111,19 @@ void ghstFramePackTelemetry(sbuf_t *dst)
 
     sbufWriteU16(dst, getMAhDrawn() / 10);                      // units of 10mAh (range of 0-655.36Ah)
 
-    sbufWriteU8(dst, 0x00);                     // Rx Voltage, units of 100mV (not passed from BF, added in Ghost Rx)
+    sbufWriteU8(dst, 0x00);                                     // Rx Voltage, units of 100mV (not passed from BF, added in Ghost Rx)
 
-    sbufWriteU8(dst, 0x00);                     // tbd1
-    sbufWriteU8(dst, 0x00);                     // tbd2
-    sbufWriteU8(dst, 0x00);                     // tbd3
+    uint8_t packFlags = 0;
+    if (!ARMING_FLAG(ARMED)) {                                  // inverted to be backwards compatible
+        packFlags |= PACK_FLAGS_Disarmed;
+    }
+    sbufWriteU8(dst, packFlags);                                // flags
+    sbufWriteU8(dst, 0x00);                                     // tbd2
+    sbufWriteU8(dst, 0x00);                                     // tbd3
 }
 
 // GPS data, primary, positional data
-void ghstFrameGpsPrimaryTelemetry(sbuf_t *dst)
+MAYBE_UNUSED static void ghstFrameGpsPrimaryTelemetry(sbuf_t *dst)
 {
     // use sbufWrite since CRC does not include frame length
     sbufWriteU8(dst, GHST_FRAME_GPS_PAYLOAD_SIZE + GHST_FRAME_LENGTH_CRC + GHST_FRAME_LENGTH_TYPE);
@@ -133,18 +142,18 @@ void ghstFrameGpsPrimaryTelemetry(sbuf_t *dst)
 }
 
 // GPS data, secondary, auxiliary data
-void ghstFrameGpsSecondaryTelemetry(sbuf_t *dst)
+MAYBE_UNUSED static void ghstFrameGpsSecondaryTelemetry(sbuf_t *dst)
 {
     // use sbufWrite since CRC does not include frame length
     sbufWriteU8(dst, GHST_FRAME_GPS_PAYLOAD_SIZE + GHST_FRAME_LENGTH_CRC + GHST_FRAME_LENGTH_TYPE);
     sbufWriteU8(dst, GHST_DL_GPS_SECONDARY);
 
-    sbufWriteU16(dst, gpsSol.groundSpeed);      // speed in 0.1m/s
+    sbufWriteU16(dst, gpsSol.groundSpeed);      // speed in 0.01m/s
     sbufWriteU16(dst, gpsSol.groundCourse);     // degrees * 10
     sbufWriteU8(dst, gpsSol.numSat);
-	
-    sbufWriteU16(dst, (uint16_t) (GPS_distanceToHome / 10));    // use units of 10m to increase range of U16 to 655.36km
-    sbufWriteU16(dst, GPS_directionToHome);
+
+    sbufWriteU16(dst, GPS_distanceToHome / 10);    // use units of 10m to increase range of U16 to 655.36km
+    sbufWriteU16(dst, GPS_directionToHome / 10);
 
     uint8_t gpsFlags = 0;
     if (STATE(GPS_FIX)) {
@@ -157,7 +166,7 @@ void ghstFrameGpsSecondaryTelemetry(sbuf_t *dst)
 }
 
 // Mag, Baro (and Vario) data
-void ghstFrameMagBaro(sbuf_t *dst)
+static void ghstFrameMagBaro(sbuf_t *dst)
 {
     int16_t vario = 0;
     int16_t altitude = 0;
@@ -186,13 +195,13 @@ void ghstFrameMagBaro(sbuf_t *dst)
 #endif
 
     // use sbufWrite since CRC does not include frame length
-    sbufWriteU8(dst, GHST_FRAME_GPS_PAYLOAD_SIZE + GHST_FRAME_LENGTH_CRC + GHST_FRAME_LENGTH_TYPE);
+    sbufWriteU8(dst, GHST_FRAME_MAGBARO_PAYLOAD_SIZE + GHST_FRAME_LENGTH_CRC + GHST_FRAME_LENGTH_TYPE);
     sbufWriteU8(dst, GHST_DL_MAGBARO);
 
     sbufWriteU16(dst, yaw);                 // magHeading, deci-degrees
     sbufWriteU16(dst, altitude);            // baroAltitude, m
     sbufWriteU8(dst, vario);                // cm/s
-	
+
     sbufWriteU16(dst, 0);
     sbufWriteU16(dst, 0);
 
@@ -204,13 +213,40 @@ typedef enum {
     GHST_FRAME_START_INDEX = 0,
     GHST_FRAME_PACK_INDEX = GHST_FRAME_START_INDEX, // Battery (Pack) data
     GHST_FRAME_GPS_PRIMARY_INDEX,                   // GPS, primary values (Lat, Long, Alt)
-    GHST_FRAME_GPS_SECONDARY_INDEX,                 // GPS, secondary values (Sat Count, HDOP, etc.)
+    GHST_FRAME_GPS_SECONDARY_INDEX,                 // GPS, secondary values (Sat Count, DOP, etc.)
     GHST_FRAME_MAGBARO_INDEX,                       // Magnetometer/Baro values
     GHST_SCHEDULE_COUNT_MAX
 } ghstFrameTypeIndex_e;
 
 static uint8_t ghstScheduleCount;
 static uint8_t ghstSchedule[GHST_SCHEDULE_COUNT_MAX];
+
+static bool mspReplyPending;
+
+void ghstScheduleMspResponse(void)
+{
+    mspReplyPending = true;
+}
+
+#if defined(USE_MSP_OVER_TELEMETRY)
+static void ghstSendMspResponse(uint8_t *payload, const uint8_t payloadSize)
+{
+    sbuf_t ghstPayloadBuf;
+    sbuf_t *dst = &ghstPayloadBuf;
+
+    static uint8_t mspFrameCounter = 0;
+    DEBUG_SET(DEBUG_GHST_MSP, 1, ++mspFrameCounter);  //!< MSP Responses Sent
+
+    ghstInitializeFrame(dst);                                                               // addr
+    sbufWriteU8(dst, GHST_PAYLOAD_SIZE + GHST_FRAME_LENGTH_CRC + GHST_FRAME_LENGTH_TYPE);   // length
+    sbufWriteU8(dst, GHST_DL_MSP_RESP);                                                 // type
+    sbufWriteData(dst, payload, payloadSize);                                           // payload
+    for(int i = 0; i < GHST_PAYLOAD_SIZE - payloadSize; ++i) {                          // payload fill zeroes
+        sbufWriteU8(dst, 0);
+    }
+    ghstFinalize(dst);  // crc
+}
+#endif
 
 static void processGhst(void)
 {
@@ -252,12 +288,16 @@ static void processGhst(void)
 
 void initGhstTelemetry(void)
 {
-    // If the GHST Rx driver is active, since tx and rx share the same pin, assume telemetry is enabled.
-    ghstTelemetryEnabled = ghstRxIsActive();
-
-    if (!ghstTelemetryEnabled) {
+    // If the GHST Rx driver is active, since tx and rx share the same pin, assume telemetry
+    // can be initialized but not enabled yet.
+    if (!ghstRxIsActive()) {
         return;
     }
+
+    ghstTelemetryEnabled = false;
+#if defined(USE_MSP_OVER_TELEMETRY)
+    mspReplyPending = false;
+#endif
 
     int index = 0;
     if ((isBatteryVoltageConfigured() && telemetryIsSensorEnabled(SENSOR_VOLTAGE))
@@ -278,15 +318,20 @@ void initGhstTelemetry(void)
 #endif
 
 #if defined(USE_BARO) || defined(USE_MAG) || defined(USE_VARIO)
-    if ((sensors(SENSOR_BARO) && telemetryIsSensorEnabled(SENSOR_ALTITUDE)) 
-        || (sensors(SENSOR_MAG) && telemetryIsSensorEnabled(SENSOR_HEADING)) 
+    if ((sensors(SENSOR_BARO) && telemetryIsSensorEnabled(SENSOR_ALTITUDE))
+        || (sensors(SENSOR_MAG) && telemetryIsSensorEnabled(SENSOR_HEADING))
         || (sensors(SENSOR_VARIO) && telemetryIsSensorEnabled(SENSOR_VARIO))) {
         ghstSchedule[index++] = BIT(GHST_FRAME_MAGBARO_INDEX);
     }
 #endif
 
-    ghstScheduleCount = (uint8_t)index;
+    ghstScheduleCount = index;
  }
+
+void setGhstTelemetryState(bool state)
+{
+    ghstTelemetryEnabled = state;
+}
 
 bool checkGhstTelemetryState(void)
 {
@@ -294,13 +339,24 @@ bool checkGhstTelemetryState(void)
 }
 
 // Called periodically by the scheduler
- void handleGhstTelemetry(timeUs_t currentTimeUs)
+void handleGhstTelemetry(timeUs_t currentTimeUs)
 {
-    static uint32_t ghstLastCycleTime;
+    static timeUs_t ghstLastCycleTime;
 
     if (!ghstTelemetryEnabled) {
         return;
     }
+
+    // Send ad-hoc response frames as soon as possible
+#if defined(USE_MSP_OVER_TELEMETRY)
+    if (mspReplyPending) {
+        ghstLastCycleTime = currentTimeUs;
+        if (ghstRxGetTelemetryBufLen() == 0) {
+            mspReplyPending = sendMspReply(GHST_DL_MSP_FRAME_SIZE, ghstSendMspResponse);
+        }
+        return;
+    }
+#endif
 
     // Ready to send telemetry?
     if (currentTimeUs >= ghstLastCycleTime + (GHST_CYCLETIME_US / ghstScheduleCount)) {

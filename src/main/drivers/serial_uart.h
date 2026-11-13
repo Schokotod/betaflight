@@ -21,41 +21,25 @@
 #pragma once
 
 #include "drivers/dma.h" // For dmaResource_t
+#include "drivers/serial_uart_types.h"
+#include "io/serial.h"   // TODO: maybe move serialPortIdentifier_e into separate header
 
-// Since serial ports can be used for any function these buffer sizes should be equal
-// The two largest things that need to be sent are: 1, MSP responses, 2, UBLOX SVINFO packet.
-
-// Size must be a power of two due to various optimizations which use 'and' instead of 'mod'
-// Various serial routines return the buffer occupied size as uint8_t which would need to be extended in order to
-// increase size further.
-
-typedef enum {
-    UARTDEV_1 = 0,
-    UARTDEV_2 = 1,
-    UARTDEV_3 = 2,
-    UARTDEV_4 = 3,
-    UARTDEV_5 = 4,
-    UARTDEV_6 = 5,
-    UARTDEV_7 = 6,
-    UARTDEV_8 = 7,
-    UARTDEV_9 = 8,
-    UARTDEV_10 = 9,
-    LPUARTDEV_1 = 10,
-} UARTDevice_e;
+#ifndef UART_TRAIT_TX_COMPLETE_PENDING
+#define UART_TRAIT_TX_COMPLETE_PENDING 0
+#endif
 
 typedef struct uartPort_s {
     serialPort_t port;
 
 #ifdef USE_DMA
-#ifdef USE_HAL_DRIVER
-    DMA_HandleTypeDef rxDMAHandle;
-    DMA_HandleTypeDef txDMAHandle;
-#endif
-
     dmaResource_t *rxDMAResource;
     dmaResource_t *txDMAResource;
     uint32_t rxDMAChannel;
     uint32_t txDMAChannel;
+#if DMA_TRAIT_MUX
+    uint32_t rxDMAMuxId;
+    uint32_t txDMAMuxId;
+#endif
 
     uint32_t rxDMAIrq;
     uint32_t txDMAIrq;
@@ -66,13 +50,15 @@ typedef struct uartPort_s {
     uint32_t rxDMAPeripheralBaseAddr;
 #endif // USE_DMA
 
-#ifdef USE_HAL_DRIVER
-    // All USARTs can also be used as UART, and we use them only as UART.
-    UART_HandleTypeDef Handle;
-#endif
-    USART_TypeDef *USARTx;
+    usartResource_t *USARTx;
     bool txDMAEmpty;
+#if UART_TRAIT_TX_COMPLETE_PENDING
+    bool txCompletePending;
+#endif
+
+    bool (* checkUsartTxOutput)(struct uartPort_s *s);
 } uartPort_t;
 
 void uartPinConfigure(const serialPinConfig_t *pSerialPinConfig);
-serialPort_t *uartOpen(UARTDevice_e device, serialReceiveCallbackPtr rxCallback, void *rxCallbackData, uint32_t baudRate, portMode_e mode, portOptions_e options);
+serialPort_t *uartOpen(serialPortIdentifier_e identifier, serialReceiveCallbackPtr rxCallback, void *rxCallbackData, uint32_t baudRate, portMode_e mode, portOptions_e options);
+int uartDeviceIndexFromIdentifier(serialPortIdentifier_e identifier);

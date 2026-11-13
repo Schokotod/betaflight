@@ -29,7 +29,6 @@
 #include "pg/pin_pull_up_down.h"
 #include "pin_pull_up_down.h"
 
-
 static void initPin(const pinPullUpDownConfig_t* config, resourceOwner_e owner, uint8_t index)
 {
     IO_t io = IOGetByTag(config->ioTag);
@@ -46,7 +45,7 @@ static void initPin(const pinPullUpDownConfig_t* config, resourceOwner_e owner, 
     }
 }
 
-void pinPullupPulldownInit()
+void pinPullupPulldownInit(void)
 {
     for (uint8_t i = 0; i < PIN_PULL_UP_DOWN_COUNT; i++) {
         initPin(pinPullupConfig(i), OWNER_PULLUP, i);

@@ -27,7 +27,48 @@
 #include "msp/msp.h"
 
 // Each MSP port requires state and a receive buffer, revisit this default if someone needs more than 3 MSP ports.
+#ifndef MAX_MSP_PORT_COUNT
 #define MAX_MSP_PORT_COUNT 3
+#endif
+
+// A feature that speaks MSP over the UART it declares needs an MSP port there,
+// which the user never assigned: an MSP-transport rangefinder or optical flow
+// module, or an MSP DisplayPort OSD.  Those get their own budget, so declaring
+// one can never cost a configurator link.  Each can sit on its own UART; two
+// features sharing one dedup to a single port.
+#if defined(USE_RANGEFINDER_MT)
+#define IMPLIED_MSP_RANGEFINDER_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_RANGEFINDER_PORT_COUNT 0
+#endif
+#if defined(USE_OPTICALFLOW_MT)
+#define IMPLIED_MSP_OPTICALFLOW_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_OPTICALFLOW_PORT_COUNT 0
+#endif
+#if defined(USE_OSD) && defined(USE_MSP_DISPLAYPORT)
+#define IMPLIED_MSP_OSD_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_OSD_PORT_COUNT 0
+#endif
+#if defined(USE_VTX_MSP)
+#define IMPLIED_MSP_VTX_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_VTX_PORT_COUNT 0
+#endif
+
+#define IMPLIED_MSP_PORT_COUNT \
+    (IMPLIED_MSP_RANGEFINDER_PORT_COUNT + IMPLIED_MSP_OPTICALFLOW_PORT_COUNT \
+     + IMPLIED_MSP_OSD_PORT_COUNT + IMPLIED_MSP_VTX_PORT_COUNT)
+
+#define MSP_PORT_COUNT (MAX_MSP_PORT_COUNT + IMPLIED_MSP_PORT_COUNT)
+
+typedef enum {
+    PORT_IDLE,
+    PORT_MSP_PACKET,
+    PORT_CLI_ACTIVE,
+    PORT_CLI_CMD
+} mspPortState_e;
 
 typedef enum {
     MSP_IDLE,
@@ -48,7 +89,7 @@ typedef enum {
     MSP_CHECKSUM_V2_NATIVE,
 
     MSP_COMMAND_RECEIVED
-} mspState_e;
+} mspPacketState_e;
 
 typedef enum {
     MSP_PACKET_COMMAND,
@@ -68,14 +109,10 @@ typedef enum {
 } mspPendingSystemRequest_e;
 
 #define MSP_PORT_INBUF_SIZE 192
-#define MSP_PORT_OUTBUF_SIZE_MIN 320
+#define MSP_PORT_OUTBUF_SIZE_MIN 512 // As of 2021/08/10 MSP_BOXNAMES generates a 307 byte response for page 1. There has been overflow issues with 320 byte buffer.
 
 #ifdef USE_FLASHFS
-#ifdef STM32F1
-#define MSP_PORT_DATAFLASH_BUFFER_SIZE 1024
-#else
 #define MSP_PORT_DATAFLASH_BUFFER_SIZE 4096
-#endif
 #define MSP_PORT_DATAFLASH_INFO_SIZE 16
 #define MSP_PORT_OUTBUF_SIZE (MSP_PORT_DATAFLASH_BUFFER_SIZE + MSP_PORT_DATAFLASH_INFO_SIZE)
 #else
@@ -104,7 +141,8 @@ typedef struct mspPort_s {
     struct serialPort_s *port; // null when port unused.
     timeMs_t lastActivityMs;
     mspPendingSystemRequest_e pendingRequest;
-    mspState_e c_state;
+    mspPortState_e portState;
+    mspPacketState_e packetState;
     mspPacketType_e packetType;
     uint8_t inBuf[MSP_PORT_INBUF_SIZE];
     uint16_t cmdMSP;
@@ -118,11 +156,15 @@ typedef struct mspPort_s {
     mspDescriptor_t descriptor;
 } mspPort_t;
 
+#define MSP_ACTIVITY_DEFAULT_TIMEOUT_MS 5000
+
 void mspSerialInit(void);
 bool mspSerialWaiting(void);
 void mspSerialProcess(mspEvaluateNonMspData_e evaluateNonMspData, mspProcessCommandFnPtr mspProcessCommandFn, mspProcessReplyFnPtr mspProcessReplyFn);
 void mspSerialAllocatePorts(void);
 void mspSerialReleasePortIfAllocated(struct serialPort_s *serialPort);
 void mspSerialReleaseSharedTelemetryPorts(void);
-int mspSerialPush(serialPortIdentifier_e port, uint8_t cmd, uint8_t *data, int datalen, mspDirection_e direction);
+mspDescriptor_t getMspSerialPortDescriptor(const serialPortIdentifier_e portIdentifier);
+int mspSerialPush(serialPortIdentifier_e port, uint8_t cmd, uint8_t *data, int datalen, mspDirection_e direction, mspVersion_e mspVersion);
 uint32_t mspSerialTxBytesFree(void);
+bool mspSerialIsConfiguratorActive(void);

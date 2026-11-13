@@ -23,6 +23,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Platforms without a software bootloader entry contract can disable it.
+#ifndef PLATFORM_SUPPORTS_SOFTWARE_BOOTLOADER
+#define PLATFORM_SUPPORTS_SOFTWARE_BOOTLOADER 1
+#endif
+
 void systemInit(void);
 
 typedef enum {
@@ -43,6 +48,8 @@ typedef enum {
     FAILURE_SDCARD_WRITE_FAILED,
     FAILURE_SDCARD_INITIALISATION_FAILED,
     FAILURE_SDCARD_REQUIRED,
+    FAILURE_FILE_READ_FAILED,
+    FAILURE_FILE_WRITE_FAILED,
 } failureMode_e;
 
 #define WARNING_FLASH_DURATION_MS 50
@@ -66,24 +73,25 @@ void systemResetToBootloader(bootloaderRequestType_e requestType);
 bool isMPUSoftReset(void);
 void cycleCounterInit(void);
 int32_t clockCyclesToMicros(int32_t clockCycles);
+float clockCyclesToMicrosf(int32_t clockCycles);
 int32_t clockCyclesTo10thMicros(int32_t clockCycles);
+int32_t clockCyclesTo100thMicros(int32_t clockCycles);
 uint32_t clockMicrosToCycles(uint32_t micros);
 uint32_t getCycleCounter(void);
-#if defined(STM32H7) || defined(STM32G4)
 void systemProcessResetReason(void);
-#endif
+
+// memory
+void memoryMappedModeInit(void);
+bool isMemoryMappedModeEnabledOnBoot(void);
 
 void initialiseMemorySections(void);
-#ifdef STM32H7
-void initialiseD2MemorySections(void);
 void systemResetWithoutDisablingCaches(void);
-#endif
 
 void enableGPIOPowerUsageAndNoiseReductions(void);
 // current crystal frequency - 8 or 12MHz
 
 extern uint32_t hse_value;
-extern uint32_t cachedRccCsrValue;
+extern uint32_t cachedResetFlags;
 
 typedef void extiCallbackHandlerFunc(void);
 

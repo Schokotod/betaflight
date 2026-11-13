@@ -26,8 +26,6 @@
 #include "platform.h"
 
 #include "common/utils.h"
-#include "common/maths.h"
-#include "common/axis.h"
 #include "common/sensor_alignment.h"
 
 #include "pg/pg.h"
@@ -38,10 +36,25 @@
 #include "boardalignment.h"
 
 static bool standardBoardAlignment = true;     // board orientation correction
-static fp_rotationMatrix_t boardRotation;
+static matrix33_t boardRotation;
 
-// no template required since defaults are zero
-PG_REGISTER(boardAlignment_t, boardAlignment, PG_BOARD_ALIGNMENT, 0);
+PG_REGISTER_WITH_RESET_TEMPLATE(boardAlignment_t, boardAlignment, PG_BOARD_ALIGNMENT, 1);
+
+#ifndef DEFAULT_ALIGN_BOARD_ROLL
+#define DEFAULT_ALIGN_BOARD_ROLL 0
+#endif
+#ifndef DEFAULT_ALIGN_BOARD_PITCH
+#define DEFAULT_ALIGN_BOARD_PITCH 0
+#endif
+#ifndef DEFAULT_ALIGN_BOARD_YAW
+#define DEFAULT_ALIGN_BOARD_YAW 0
+#endif
+
+PG_RESET_TEMPLATE(boardAlignment_t, boardAlignment,
+        .rollDegrees = DEFAULT_ALIGN_BOARD_ROLL,
+        .pitchDegrees = DEFAULT_ALIGN_BOARD_PITCH,
+        .yawDegrees = DEFAULT_ALIGN_BOARD_YAW,
+);
 
 static bool isBoardAlignmentStandard(const boardAlignment_t *boardAlignment)
 {
@@ -61,70 +74,68 @@ void initBoardAlignment(const boardAlignment_t *boardAlignment)
     rotationAngles.angles.pitch = degreesToRadians(boardAlignment->pitchDegrees);
     rotationAngles.angles.yaw   = degreesToRadians(boardAlignment->yawDegrees  );
 
-    buildRotationMatrix(&rotationAngles, &boardRotation);
+    buildRotationMatrix(&boardRotation, &rotationAngles);
 }
 
-static void alignBoard(float *vec)
+static void alignBoard(vector3_t *vec)
 {
-    applyMatrixRotation(vec, &boardRotation);
+    applyRotationMatrix(vec, &boardRotation);
 }
 
-FAST_CODE_NOINLINE void alignSensorViaMatrix(float *dest, fp_rotationMatrix_t* sensorRotationMatrix)
+FAST_CODE_NOINLINE void alignSensorViaMatrix(vector3_t *dest, matrix33_t *sensorRotationMatrix)
 {
-    applyMatrixRotation(dest, sensorRotationMatrix);
+    applyRotationMatrix(dest, sensorRotationMatrix);
 
     if (!standardBoardAlignment) {
         alignBoard(dest);
     }
 }
 
-void alignSensorViaRotation(float *dest, uint8_t rotation)
+void alignSensorViaRotation(vector3_t *dest, sensor_align_e rotation)
 {
-    const float x = dest[X];
-    const float y = dest[Y];
-    const float z = dest[Z];
+    const vector3_t tmp = *dest;
 
     switch (rotation) {
     default:
     case CW0_DEG:
-        dest[X] = x;
-        dest[Y] = y;
-        dest[Z] = z;
+        dest->x = tmp.x;
+        dest->y = tmp.y;
+        dest->z = tmp.z;
         break;
     case CW90_DEG:
-        dest[X] = y;
-        dest[Y] = -x;
-        dest[Z] = z;
+        dest->x = tmp.y;
+        dest->y = -tmp.x;
+        dest->z = tmp.z;
         break;
     case CW180_DEG:
-        dest[X] = -x;
-        dest[Y] = -y;
-        dest[Z] = z;
+        dest->x = -tmp.x;
+        dest->y = -tmp.y;
+        dest->z = tmp.z;
         break;
     case CW270_DEG:
-        dest[X] = -y;
-        dest[Y] = x;
-        dest[Z] = z;
+        dest->x = -tmp.y;
+        dest->y = tmp.x;
+        dest->z = tmp.z;
         break;
     case CW0_DEG_FLIP:
-        dest[X] = -x;
-        dest[Y] = y;
-        dest[Z] = -z;
+        dest->x = -tmp.x;
+        dest->y = tmp.y;
+        dest->z = -tmp.z;
         break;
     case CW90_DEG_FLIP:
-        dest[X] = y;
-        dest[Y] = x;
-        dest[Z] = -z;
+        dest->x = tmp.y;
+        dest->y = tmp.x;
+        dest->z = -tmp.z;
         break;
     case CW180_DEG_FLIP:
-        dest[X] = x;
-        dest[Y] = -y;
-        dest[Z] = -z;
+        dest->x = tmp.x;
+        dest->y = -tmp.y;
+        dest->z = -tmp.z;
         break;
     case CW270_DEG_FLIP:
-        dest[X] = -y;
-        dest[Y] = -x;
-        dest[Z] = -z;
+        dest->x = -tmp.y;
+        dest->y = -tmp.x;
+        dest->z = -tmp.z;
         break;
     }
 

@@ -29,7 +29,7 @@ typedef enum {
 
 #define SDIODEV_COUNT 2
 
-#if defined(STM32H7)
-void sdioPinConfigure();
-void SDIO_GPIO_Init(void);
+#if ENABLE_SDIO_INIT && defined(USE_SDCARD_SDIO)
+void sdioPinConfigure(void);
+void sdioInitialize(void);
 #endif

@@ -108,7 +108,7 @@ typedef struct pageEntry_s {
 } pageEntry_t;
 
 static const char tickerCharacters[] = "|/-\\"; // use 2/4/8 characters so that the divide is optimal.
-#define TICKER_CHARACTER_COUNT (sizeof(tickerCharacters) / sizeof(char))
+#define TICKER_CHARACTER_COUNT ARRAYLEN(tickerCharacters)
 
 typedef enum {
     PAGE_STATE_FLAG_NONE = 0,
@@ -131,7 +131,7 @@ static void resetDisplay(void)
     dashboardPresent = ug2864hsweg01InitI2C(dev);
 }
 
-void LCDprint(uint8_t i)
+static void LCDprint(uint8_t i)
 {
    i2c_OLED_send_char(dev, i);
 }
@@ -177,19 +177,6 @@ static void drawHorizonalPercentageBar(uint8_t width,uint8_t percent)
         LCDprint(154); // empty
 }
 
-#if 0
-static void fillScreenWithCharacters(void)
-{
-    for (uint8_t row = 0; row < SCREEN_CHARACTER_ROW_COUNT; row++) {
-        for (uint8_t column = 0; column < SCREEN_CHARACTER_COLUMN_COUNT; column++) {
-            i2c_OLED_set_xy(dev, column, row);
-            i2c_OLED_send_char(dev, 'A' + column);
-        }
-    }
-}
-#endif
-
-
 static void updateTicker(void)
 {
     static uint8_t tickerIndex = 0;
@@ -203,7 +190,7 @@ static void updateRxStatus(void)
 {
     i2c_OLED_set_xy(dev, SCREEN_CHARACTER_COLUMN_COUNT - 2, 0);
     char rxStatus = '!';
-    if (rxIsReceivingSignal()) {
+    if (isRxReceivingSignal()) {
         rxStatus = 'r';
     } if (rxAreFlightChannelsValid()) {
         rxStatus = 'R';
@@ -236,6 +223,9 @@ static void updateFailsafeStatus(void)
     case FAILSAFE_GPS_RESCUE:
         failsafeIndicator = 'G';
         break;
+    case FAILSAFE_AUTOPILOT:
+        failsafeIndicator = 'A';
+        break;
     }
     i2c_OLED_set_xy(dev, SCREEN_CHARACTER_COLUMN_COUNT - 3, 0);
     i2c_OLED_send_char(dev, failsafeIndicator);
@@ -257,7 +247,7 @@ static void drawRxChannel(uint8_t channelIndex, uint8_t width)
 {
     LCDprint(rcChannelLetters[channelIndex]);
 
-    const uint32_t percentage = (constrain(rcData[channelIndex], PWM_RANGE_MIN, PWM_RANGE_MAX) - PWM_RANGE_MIN) * 100 / (PWM_RANGE_MAX - PWM_RANGE_MIN);
+    const uint32_t percentage = scaleRangef(constrainf(rcGetChannel(channelIndex), NORMALISED_RANGE_MIN, NORMALISED_RANGE_MAX), NORMALISED_RANGE_MIN, NORMALISED_RANGE_MAX, 0, 100);
     drawHorizonalPercentageBar(width - 1, percentage);
 }
 
@@ -285,7 +275,16 @@ static void showWelcomePage(void)
 {
     uint8_t rowIndex = PAGE_TITLE_LINE_COUNT;
 
-    tfp_sprintf(lineBuffer, "v%s (%s)", FC_VERSION_STRING, shortGitRevision);
+    // Version and revision no longer share a line: with calver plus an optional suffix
+    // (e.g. "2026.12.0-alpha") "v<version> (<revision>)" overruns lineBuffer.
+    STATIC_ASSERT(sizeof("v" FC_VERSION_STRING) <= sizeof(lineBuffer), version_line_too_long);
+    tfp_sprintf(lineBuffer, "v%s", FC_VERSION_STRING);
+    i2c_OLED_set_line(dev, rowIndex++);
+    i2c_OLED_send_string(dev, lineBuffer);
+
+    // shortGitRevision is __REVISION__, so the same check applies to the revision line.
+    STATIC_ASSERT(sizeof("(" __REVISION__ ")") <= sizeof(lineBuffer), revision_line_too_long);
+    tfp_sprintf(lineBuffer, "(%s)", shortGitRevision);
     i2c_OLED_set_line(dev, rowIndex++);
     i2c_OLED_send_string(dev, lineBuffer);
 
@@ -364,7 +363,7 @@ static void showRateProfilePage(void)
     i2c_OLED_send_string(dev, lineBuffer);
 }
 
-#define SATELLITE_COUNT (sizeof(GPS_svinfo_cno) / sizeof(GPS_svinfo_cno[0]))
+#define SATELLITE_COUNT ARRAYLEN(GPS_svinfo)
 #define SATELLITE_GRAPH_LEFT_OFFSET ((SCREEN_CHARACTER_COLUMN_COUNT - SATELLITE_COUNT) / 2)
 
 #ifdef USE_GPS
@@ -379,8 +378,8 @@ static void showGpsPage(void)
 
     static uint8_t gpsTicker = 0;
     static uint32_t lastGPSSvInfoReceivedCount = 0;
-    if (GPS_svInfoReceivedCount != lastGPSSvInfoReceivedCount) {
-        lastGPSSvInfoReceivedCount = GPS_svInfoReceivedCount;
+    if (dashboardGpsNavSvInfoRcvCount != lastGPSSvInfoReceivedCount) {
+        lastGPSSvInfoReceivedCount = dashboardGpsNavSvInfoRcvCount;
         gpsTicker++;
         gpsTicker = gpsTicker % TICKER_CHARACTER_COUNT;
     }
@@ -392,11 +391,10 @@ static void showGpsPage(void)
 
     uint32_t index;
     for (index = 0; index < SATELLITE_COUNT && index < SCREEN_CHARACTER_COLUMN_COUNT; index++) {
-        uint8_t bargraphOffset = ((uint16_t) GPS_svinfo_cno[index] * VERTICAL_BARGRAPH_CHARACTER_COUNT) / (GPS_DBHZ_MAX - 1);
+        uint8_t bargraphOffset = ((uint16_t) GPS_svinfo[index].cno * VERTICAL_BARGRAPH_CHARACTER_COUNT) / (GPS_DBHZ_MAX - 1);
         bargraphOffset = MIN(bargraphOffset, VERTICAL_BARGRAPH_CHARACTER_COUNT - 1);
         i2c_OLED_send_char(dev, VERTICAL_BARGRAPH_ZERO_CHARACTER + bargraphOffset);
     }
-
 
     char fixChar = STATE(GPS_FIX) ? 'Y' : 'N';
     tfp_sprintf(lineBuffer, "Sats: %d Fix: %c", gpsSol.numSat, fixChar);
@@ -419,7 +417,7 @@ static void showGpsPage(void)
     i2c_OLED_set_xy(dev, HALF_SCREEN_CHARACTER_COLUMN_COUNT, rowIndex++);
     i2c_OLED_send_string(dev, lineBuffer);
 
-    tfp_sprintf(lineBuffer, "RX: %d", GPS_packetCount);
+    tfp_sprintf(lineBuffer, "RX: %d", dashboardGpsPacketCount);
     padHalfLineBuffer();
     i2c_OLED_set_line(dev, rowIndex);
     i2c_OLED_send_string(dev, lineBuffer);
@@ -429,7 +427,7 @@ static void showGpsPage(void)
     i2c_OLED_set_xy(dev, HALF_SCREEN_CHARACTER_COLUMN_COUNT, rowIndex++);
     i2c_OLED_send_string(dev, lineBuffer);
 
-    tfp_sprintf(lineBuffer, "Dt: %d", gpsData.lastMessage - gpsData.lastLastMessage);
+    tfp_sprintf(lineBuffer, "Dt: %d", gpsSol.navIntervalMs);
     padHalfLineBuffer();
     i2c_OLED_set_line(dev, rowIndex);
     i2c_OLED_send_string(dev, lineBuffer);
@@ -439,7 +437,9 @@ static void showGpsPage(void)
     i2c_OLED_set_xy(dev, HALF_SCREEN_CHARACTER_COLUMN_COUNT, rowIndex++);
     i2c_OLED_send_string(dev, lineBuffer);
 
-    strncpy(lineBuffer, gpsPacketLog, GPS_PACKET_LOG_ENTRY_COUNT);
+    STATIC_ASSERT(GPS_PACKET_LOG_ENTRY_COUNT < sizeof(lineBuffer), gps_packet_log_too_long);
+    strncpy(lineBuffer, dashboardGpsPacketLog, GPS_PACKET_LOG_ENTRY_COUNT);
+    lineBuffer[GPS_PACKET_LOG_ENTRY_COUNT] = 0;
     padHalfLineBuffer();
     i2c_OLED_set_line(dev, rowIndex++);
     i2c_OLED_send_string(dev, lineBuffer);
@@ -451,7 +451,11 @@ static void showBatteryPage(void)
     uint8_t rowIndex = PAGE_TITLE_LINE_COUNT;
 
     if (batteryConfig()->voltageMeterSource != VOLTAGE_METER_NONE) {
-        tfp_sprintf(lineBuffer, "Volts: %d.%02d Cells: %d", getBatteryVoltage() / 100, getBatteryVoltage() % 100, getBatteryCellCount());
+        // 123456789012345678901
+        // Volts:DDD.DD Cells:DD
+        // force_battery_cell_count goes up to 24, so both fields can be two digits and the
+        // voltage three; the spaces after the colons are dropped to stay inside the line.
+        tfp_sprintf(lineBuffer, "Volts:%d.%02d Cells:%d", getBatteryVoltage() / 100, getBatteryVoltage() % 100, getBatteryCellCount());
         padLineBuffer();
         i2c_OLED_set_line(dev, rowIndex++);
         i2c_OLED_send_string(dev, lineBuffer);
@@ -480,14 +484,16 @@ static void showBatteryPage(void)
 static void showSensorsPage(void)
 {
     uint8_t rowIndex = PAGE_TITLE_LINE_COUNT;
-    static const char *format = "%s %5d %5d %5d";
+    // Field width must hold the widest int16 value ("-32768"); the widths still line
+    // the columns up with the header below.
+    static const char *format = "%s%6d%6d%6d";
 
     i2c_OLED_set_line(dev, rowIndex++);
     i2c_OLED_send_string(dev, "        X     Y     Z");
 
 #if defined(USE_ACC)
     if (sensors(SENSOR_ACC)) {
-        tfp_sprintf(lineBuffer, format, "ACC", lrintf(acc.accADC[X]), lrintf(acc.accADC[Y]), lrintf(acc.accADC[Z]));
+        tfp_sprintf(lineBuffer, format, "ACC", lrintf(acc.accADC.x), lrintf(acc.accADC.y), lrintf(acc.accADC.z));
         padLineBuffer();
         i2c_OLED_set_line(dev, rowIndex++);
         i2c_OLED_send_string(dev, lineBuffer);
@@ -503,7 +509,7 @@ static void showSensorsPage(void)
 
 #ifdef USE_MAG
     if (sensors(SENSOR_MAG)) {
-        tfp_sprintf(lineBuffer, format, "MAG", lrintf(mag.magADC[X]), lrintf(mag.magADC[Y]), lrintf(mag.magADC[Z]));
+        tfp_sprintf(lineBuffer, format, "MAG", lrintf(mag.magADC.x), lrintf(mag.magADC.y), lrintf(mag.magADC.z));
         padLineBuffer();
         i2c_OLED_set_line(dev, rowIndex++);
         i2c_OLED_send_string(dev, lineBuffer);
@@ -554,9 +560,8 @@ static void showTasksPage(void)
     for (taskId_e taskId = 0; taskId < TASK_COUNT; ++taskId) {
         getTaskInfo(taskId, &taskInfo);
         if (taskInfo.isEnabled && taskId != TASK_SERIAL) {// don't waste a line of the display showing serial taskInfo
-            const int taskFrequency = (int)(1000000.0f / ((float)taskInfo.latestDeltaTimeUs));
-            const int maxLoad = taskInfo.maxExecutionTimeUs == 0 ? 0 : (taskInfo.maxExecutionTimeUs * taskFrequency) / 1000;
-            const int averageLoad = taskInfo.averageExecutionTime10thUs == 0 ? 0 : (taskInfo.averageExecutionTime10thUs * taskFrequency) / 10000;
+            const int maxLoad = taskInfo.maxLoad10thPct / 10;
+            const int averageLoad = taskInfo.movingAverageLoad10thPct / 10;
             tfp_sprintf(lineBuffer, format, taskId, taskInfo.maxExecutionTimeUs, taskInfo.averageExecutionTime10thUs / 10, maxLoad, averageLoad);
             padLineBuffer();
             i2c_OLED_set_line(dev, rowIndex++);
@@ -610,7 +615,6 @@ static void showDebugPage(void)
 }
 #endif
 
-
 static const pageEntry_t pages[PAGE_COUNT] = {
     { PAGE_WELCOME, FC_FIRMWARE_NAME,  showWelcomePage,    PAGE_FLAGS_SKIP_CYCLING },
     { PAGE_ARMED,   "ARMED",           showArmedPage,      PAGE_FLAGS_SKIP_CYCLING },
@@ -631,8 +635,7 @@ static const pageEntry_t pages[PAGE_COUNT] = {
 #endif
 };
 
-
-void dashboardSetPage(pageId_e pageId)
+static void dashboardSetPage(pageId_e pageId)
 {
     for (int i = 0; i < PAGE_COUNT; i++) {
         const pageEntry_t *candidatePage = &pages[i];

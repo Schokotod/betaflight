@@ -154,7 +154,8 @@ const cc2500RegisterConfigElement_t cc2500FrskyXLbtV2Config[] =
     { CC2500_08_PKTCTRL0, 0x05 },
 };
 
-static void initialise() {
+static void initialise(void)
+{
     rxSpiStartupSpeed();
 
     cc2500Reset();
@@ -234,7 +235,7 @@ static void initTuneRx(void)
     cc2500Strobe(CC2500_SRX);
 }
 
-static bool isValidBindPacket(uint8_t *packet)
+static bool isValidBindPacket(const uint8_t *packet)
 {
     if (spiProtocol == RX_SPI_FRSKY_D || spiProtocol == RX_SPI_FRSKY_X_V2 || spiProtocol == RX_SPI_FRSKY_X_LBT_V2) {
         if (!(packet[packetLength - 1] & 0x80)) {
@@ -435,6 +436,8 @@ rx_spi_received_e frSkySpiDataReceived(uint8_t *packet)
         protocolState = STATE_STARTING;
 
         break;
+
+    case STATE_STARTING:
     default:
         ret = handlePacket(packet, &protocolState);
 

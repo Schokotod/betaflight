@@ -49,9 +49,6 @@
 // Chosen so that CMD8 will have the same CRC as CMD0:
 #define SDCARD_IF_COND_CHECK_PATTERN                0xAB
 
-#define SDCARD_TIMEOUT_INIT_MILLIS                  200
-#define SDCARD_MAX_CONSECUTIVE_FAILURES             8
-
 /* SPI_CLOCK_INITIALIZATION (256) is the slowest (Spec calls for under 400KHz) */
 #define SDCARD_SPI_INITIALIZATION_CLOCK_DIVIDER     SPI_CLOCK_INITIALIZATION
 
@@ -103,10 +100,10 @@ bool sdcard_isInserted(void)
  */
 sdcardVTable_t *sdcardVTable;
 
-void sdcard_preInit(const sdcardConfig_t *config)
+void sdcard_preinit(const sdcardConfig_t *config)
 {
 #ifdef USE_SDCARD_SPI
-    sdcardSpiVTable.sdcard_preInit(config);
+    sdcardSpiVTable.sdcard_preinit(config);
 #else
     UNUSED(config);
 #endif

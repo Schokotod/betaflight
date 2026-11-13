@@ -23,6 +23,8 @@
 
 #include <string.h>
 
+#include "common/utils.h"
+
 #include "config/config.h"
 #include "drivers/vtx_common.h"
 #include "io/vtx.h"
@@ -98,7 +100,7 @@ const uint8_t vtxSaPi[SPEKTRUM_VTX_POWER_COUNT] = {
 };
 #endif // USE_VTX_SMARTAUDIO
 
-uint8_t convertSpektrumVtxPowerIndex(uint8_t sPower)
+static uint8_t convertSpektrumVtxPowerIndex(uint8_t sPower)
 {
     uint8_t devicePower = 0;
 
@@ -125,6 +127,7 @@ uint8_t convertSpektrumVtxPowerIndex(uint8_t sPower)
     case VTXDEV_UNKNOWN:
     case VTXDEV_UNSUPPORTED:
     default:
+        UNUSED(sPower);
         break;
 
     }
@@ -146,7 +149,6 @@ void spektrumHandleVtxControl(uint32_t vtxCntrl)
   vtxControl_ipc = vtxCntrl;
 }
 // ###########################################
-
 
 // ############ VTX_CONTROL task #############
 void spektrumVtxControl(void)

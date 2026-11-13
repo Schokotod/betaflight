@@ -62,7 +62,7 @@ static uint8_t ms5611_osr = CMD_ADC_4096;
 #define MS5611_DATA_FRAME_SIZE 3
 static DMA_DATA_ZERO_INIT uint8_t sensor_data[MS5611_DATA_FRAME_SIZE];
 
-void ms5611BusInit(const extDevice_t *dev)
+static void ms5611BusInit(const extDevice_t *dev)
 {
 #ifdef USE_BARO_SPI_MS5611
     if (dev->bus->busType == BUS_TYPE_SPI) {
@@ -76,11 +76,11 @@ void ms5611BusInit(const extDevice_t *dev)
 #endif
 }
 
-void ms5611BusDeinit(const extDevice_t *dev)
+static void ms5611BusDeinit(const extDevice_t *dev)
 {
 #ifdef USE_BARO_SPI_MS5611
     if (dev->bus->busType == BUS_TYPE_SPI) {
-        spiPreinitByIO(dev->busType_u.spi.csnPin);
+        ioPreinitByIO(dev->busType_u.spi.csnPin, IOCFG_IPU, PREINIT_PIN_STATE_HIGH);
     }
 #else
     UNUSED(dev);
@@ -138,9 +138,9 @@ static void ms5611ReadAdc(const extDevice_t *dev)
     busRawReadRegisterBufferStart(dev, CMD_ADC_READ, sensor_data, MS5611_DATA_FRAME_SIZE); // read ADC
 }
 
-static void ms5611StartUT(baroDev_t *baro)
+static bool ms5611StartUT(baroDev_t *baro)
 {
-    busRawWriteRegisterStart(&baro->dev, CMD_ADC_CONV + CMD_ADC_D2 + ms5611_osr, 1); // D2 (temperature) conversion start!
+    return busRawWriteRegisterStart(&baro->dev, CMD_ADC_CONV + CMD_ADC_D2 + ms5611_osr, 1); // D2 (temperature) conversion start!
 }
 
 static bool ms5611ReadUT(baroDev_t *baro)
@@ -165,9 +165,9 @@ static bool ms5611GetUT(baroDev_t *baro)
     return true;
 }
 
-static void ms5611StartUP(baroDev_t *baro)
+static bool ms5611StartUP(baroDev_t *baro)
 {
-    busRawWriteRegisterStart(&baro->dev, CMD_ADC_CONV + CMD_ADC_D1 + ms5611_osr, 1); // D1 (pressure) conversion start!
+    return busRawWriteRegisterStart(&baro->dev, CMD_ADC_CONV + CMD_ADC_D1 + ms5611_osr, 1); // D1 (pressure) conversion start!
 }
 
 static bool ms5611ReadUP(baroDev_t *baro)
@@ -216,7 +216,6 @@ STATIC_UNIT_TESTED void ms5611Calculate(int32_t *pressure, int32_t *temperature)
     temp -= ((dT * dT) >> 31);
     }
     press = ((((int64_t)ms5611_up * sens) >> 21) - off) >> 15;
-
 
     if (pressure)
         *pressure = press;

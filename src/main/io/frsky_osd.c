@@ -17,6 +17,8 @@
 #include "io/frsky_osd.h"
 #include "io/serial.h"
 
+#include "osd/osd.h"
+
 #define FRSKY_OSD_BAUDRATE 115200
 #define FRSKY_OSD_SUPPORTED_API_VERSION 1
 
@@ -210,7 +212,6 @@ typedef struct frskyOsdDrawStrMaskCommandHeaderCmd_s {
     uint8_t maskColor;
     // uvarint with size and blob follow
 } __attribute__((packed)) frskyOsdDrawStrMaskCommandHeaderCmd_t;
-
 
 typedef struct frskyOsdState_s {
     struct {
@@ -513,16 +514,16 @@ bool frskyOsdInit(videoSystem_e videoSystem)
     FRSKY_OSD_TRACE("frskyOsdInit()");
     // TODO: Use videoSystem to set the signal standard when
     // no input is detected.
-    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_FRSKY_OSD);
-    if (portConfig) {
+    const serialPortIdentifier_e port = osdConfig()->osd_uart;
+    if (port != SERIAL_PORT_NONE) {
         FRSKY_OSD_TRACE("FrSky OSD configured, trying to connect...");
         portOptions_e portOptions = 0;
-        serialPort_t *port = openSerialPort(portConfig->identifier,
+        serialPort_t *serialPort = openSerialPort(port,
             FUNCTION_FRSKY_OSD, NULL, NULL, FRSKY_OSD_BAUDRATE,
             MODE_RXTX, portOptions);
 
-        if (port) {
-            frskyOsdStateReset(port);
+        if (serialPort) {
+            frskyOsdStateReset(serialPort);
             frskyOsdRequestInfo();
             return true;
         }
@@ -922,6 +923,5 @@ void frskyOsdContextPop(void)
 {
     frskyOsdSendAsyncCommand(OSD_CMD_CONTEXT_POP, NULL, 0);
 }
-
 
 #endif

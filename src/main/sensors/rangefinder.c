@@ -41,9 +41,13 @@
 #include "drivers/rangefinder/rangefinder.h"
 #include "drivers/rangefinder/rangefinder_hcsr04.h"
 #include "drivers/rangefinder/rangefinder_lidartf.h"
+#include "drivers/rangefinder/rangefinder_lidarmt.h"
+#include "drivers/rangefinder/rangefinder_nooploop.h"
+#include "drivers/rangefinder/rangefinder_upt1.h"
 #include "drivers/time.h"
 
 #include "fc/runtime_config.h"
+#include "io/serial.h"
 
 #include "pg/pg.h"
 #include "pg/pg_ids.h"
@@ -53,6 +57,7 @@
 #include "sensors/sensors.h"
 #include "sensors/rangefinder.h"
 #include "sensors/battery.h"
+
 
 //#include "uav_interconnect/uav_interconnect.h"
 
@@ -69,10 +74,11 @@ rangefinder_t rangefinder;
 #define RANGEFINDER_DYNAMIC_THRESHOLD           600     //Used to determine max. usable rangefinder disatance
 #define RANGEFINDER_DYNAMIC_FACTOR              75
 
-PG_REGISTER_WITH_RESET_TEMPLATE(rangefinderConfig_t, rangefinderConfig, PG_RANGEFINDER_CONFIG, 0);
+PG_REGISTER_WITH_RESET_TEMPLATE(rangefinderConfig_t, rangefinderConfig, PG_RANGEFINDER_CONFIG, 1);
 
 PG_RESET_TEMPLATE(rangefinderConfig_t, rangefinderConfig,
     .rangefinder_hardware = RANGEFINDER_NONE,
+    .rangefinder_uart = SERIAL_PORT_NONE,
 );
 
 #ifdef USE_RANGEFINDER_HCSR04
@@ -90,9 +96,8 @@ PG_RESET_TEMPLATE(sonarConfig_t, sonarConfig,
 static bool rangefinderDetect(rangefinderDev_t * dev, uint8_t rangefinderHardwareToUse)
 {
     rangefinderType_e rangefinderHardware = RANGEFINDER_NONE;
-    requestedSensors[SENSOR_INDEX_RANGEFINDER] = rangefinderHardwareToUse;
 
-#if !defined(USE_RANGEFINDER_HCSR04) && !defined(USE_RANGEFINDER_TF)
+#if !defined(USE_RANGEFINDER_HCSR04) && !defined(USE_RANGEFINDER_TF) && !defined(USE_RANGEFINDER_NOOPLOOP) && !defined(USE_RANGEFINDER_UPT1)
     UNUSED(dev);
 #endif
 
@@ -108,25 +113,57 @@ static bool rangefinderDetect(rangefinderDev_t * dev, uint8_t rangefinderHardwar
 #endif
             break;
 
-        case RANGEFINDER_TFMINI:
 #if defined(USE_RANGEFINDER_TF)
-            if (lidarTFminiDetect(dev)) {
-                rangefinderHardware = RANGEFINDER_TFMINI;
-                rescheduleTask(TASK_RANGEFINDER, TASK_PERIOD_MS(RANGEFINDER_TF_TASK_PERIOD_MS));
+        case RANGEFINDER_TFMINI:
+        case RANGEFINDER_TF02:
+        case RANGEFINDER_TFNOVA:
+            if (lidarTFDetect(dev, rangefinderHardwareToUse)) {
+                rangefinderHardware = rangefinderHardwareToUse;
+                rescheduleTask(TASK_RANGEFINDER, TASK_PERIOD_MS(dev->delayMs));
             }
 #endif
             break;
 
-        case RANGEFINDER_TF02:
-#if defined(USE_RANGEFINDER_TF)
-            if (lidarTF02Detect(dev)) {
-                rangefinderHardware = RANGEFINDER_TF02;
-                rescheduleTask(TASK_RANGEFINDER, TASK_PERIOD_MS(RANGEFINDER_TF_TASK_PERIOD_MS));
+#if defined(USE_RANGEFINDER_NOOPLOOP)
+        case RANGEFINDER_NOOPLOOP_F2:
+        case RANGEFINDER_NOOPLOOP_F2P:
+        case RANGEFINDER_NOOPLOOP_F2PH:
+        case RANGEFINDER_NOOPLOOP_F:
+        case RANGEFINDER_NOOPLOOP_FP:
+        case RANGEFINDER_NOOPLOOP_F2MINI:
+            if (nooploopDetect(dev, rangefinderHardwareToUse)) {
+                rangefinderHardware = rangefinderHardwareToUse;
+                rescheduleTask(TASK_RANGEFINDER, TASK_PERIOD_MS(dev->delayMs));
             }
-#endif
             break;
+#endif
+
+#if defined(USE_RANGEFINDER_MT)
+        case RANGEFINDER_MTF01:
+        case RANGEFINDER_MTF02:
+        case RANGEFINDER_MTF01P:
+        case RANGEFINDER_MTF02P:
+            if (mtRangefinderDetect(dev, rangefinderHardwareToUse)) {
+                rangefinderHardware = rangefinderHardwareToUse;
+                rescheduleTask(TASK_RANGEFINDER, TASK_PERIOD_MS(dev->delayMs));
+            }
+            break;
+#endif
+
+#if defined(USE_RANGEFINDER_UPT1)
+        case RANGEFINDER_UPT1:
+            if (rangefinderUPT1Detect(dev)) {
+                rangefinderHardware = RANGEFINDER_UPT1;
+                rescheduleTask(TASK_RANGEFINDER, TASK_PERIOD_MS(RANGEFINDER_UPT1_TASK_PERIOD_MS));
+            }
+            break;
+#endif
 
         case RANGEFINDER_NONE:
+            rangefinderHardware = RANGEFINDER_NONE;
+            break;
+
+        default:
             rangefinderHardware = RANGEFINDER_NONE;
             break;
     }
@@ -158,6 +195,8 @@ bool rangefinderInit(void)
     rangefinder.calculatedAltitude = RANGEFINDER_OUT_OF_RANGE;
     rangefinder.maxTiltCos = cos_approx(DECIDEGREES_TO_RADIANS(rangefinder.dev.detectionConeExtendedDeciDegrees / 2.0f));
     rangefinder.lastValidResponseTimeMs = millis();
+    rangefinder.lastDataTimeUs = 0;
+    rangefinder.dataIntervalUs = 0;
     rangefinder.snr = 0;
 
     rangefinderResetDynamicThreshold();
@@ -189,7 +228,8 @@ static int32_t applyMedianFilter(int32_t newReading)
     return medianFilterReady ? quickMedianFilter5(filterSamples) : newReading;
 }
 
-static int16_t computePseudoSnr(int32_t newReading) {
+static int16_t computePseudoSnr(int32_t newReading)
+{
     #define SNR_SAMPLES 5
     static int16_t snrSamples[SNR_SAMPLES];
     static uint8_t snrSampleIndex = 0;
@@ -229,7 +269,8 @@ void rangefinderUpdate(void)
     }
 }
 
-bool isSurfaceAltitudeValid() {
+static bool isSurfaceAltitudeValid(void)
+{
 
     /*
      * Preconditions: raw and calculated altidude > 0
@@ -260,7 +301,7 @@ bool isSurfaceAltitudeValid() {
 /**
  * Get the last distance measured by the sonar in centimeters. When the ground is too far away, RANGEFINDER_OUT_OF_RANGE is returned.
  */
-bool rangefinderProcess(float cosTiltAngle)
+bool rangefinderProcess(timeUs_t nowUs, float cosTiltAngle)
 {
     if (rangefinder.dev.read) {
         const int32_t distance = rangefinder.dev.read(&rangefinder.dev);
@@ -269,6 +310,16 @@ bool rangefinderProcess(float cosTiltAngle)
         if (distance == RANGEFINDER_NO_NEW_DATA) {
             return false;
         }
+
+        // Timestamp actual device samples, so that consumers can measure the true
+        // hardware data rate rather than the (possibly faster) driver poll rate
+        if (rangefinder.lastDataTimeUs != 0) {
+            const timeDelta_t intervalUs = cmpTimeUs(nowUs, rangefinder.lastDataTimeUs);
+            if (intervalUs > 0) {
+                rangefinder.dataIntervalUs = intervalUs;
+            }
+        }
+        rangefinder.lastDataTimeUs = nowUs;
 
         if (distance >= 0) {
             rangefinder.lastValidResponseTimeMs = millis();
@@ -296,12 +347,12 @@ bool rangefinderProcess(float cosTiltAngle)
 
         }
 
-        DEBUG_SET(DEBUG_RANGEFINDER, 3, rangefinder.snr);
+        DEBUG_SET(DEBUG_RANGEFINDER, 3, rangefinder.snr);  //!< Signal Quality
 
-        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 0, rangefinder.rawAltitude);
-        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 1, rangefinder.snrThresholdReached);
-        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 2, rangefinder.dynamicDistanceThreshold);
-        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 3, isSurfaceAltitudeValid());
+        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 0, rangefinder.rawAltitude);               //!< Raw Altitude [unit:cm]
+        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 1, rangefinder.snrThresholdReached);       //!< Signal Quality Threshold Reached
+        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 2, rangefinder.dynamicDistanceThreshold);  //!< Dynamic Distance Threshold [unit:cm]
+        DEBUG_SET(DEBUG_RANGEFINDER_QUALITY, 3, isSurfaceAltitudeValid());              //!< Surface Altitude Valid
 
     }
     else {
@@ -315,14 +366,16 @@ bool rangefinderProcess(float cosTiltAngle)
     *
     * When the ground is too far away or the tilt is too large, RANGEFINDER_OUT_OF_RANGE is returned.
     */
+    DEBUG_SET(DEBUG_RANGEFINDER, 4, lrintf(cosTiltAngle * 1000.0f));            //!< Cosine Of Tilt Angle [unit:0.001]
+    DEBUG_SET(DEBUG_RANGEFINDER, 5, lrintf(rangefinder.maxTiltCos * 1000.0f));  //!< Max Usable Tilt Cosine [unit:0.001]
     if (cosTiltAngle < rangefinder.maxTiltCos || rangefinder.rawAltitude < 0) {
         rangefinder.calculatedAltitude = RANGEFINDER_OUT_OF_RANGE;
     } else {
         rangefinder.calculatedAltitude = rangefinder.rawAltitude * cosTiltAngle;
     }
 
-    DEBUG_SET(DEBUG_RANGEFINDER, 1, rangefinder.rawAltitude);
-    DEBUG_SET(DEBUG_RANGEFINDER, 2, rangefinder.calculatedAltitude);
+    DEBUG_SET(DEBUG_RANGEFINDER, 1, rangefinder.rawAltitude);         //!< Raw Altitude [unit:cm]
+    DEBUG_SET(DEBUG_RANGEFINDER, 2, rangefinder.calculatedAltitude);  //!< Tilt Corrected Altitude [unit:cm]
 
     return true;
 }
@@ -336,8 +389,19 @@ int32_t rangefinderGetLatestAltitude(void)
     return rangefinder.calculatedAltitude;
 }
 
-int32_t rangefinderGetLatestRawAltitude(void) {
+int32_t rangefinderGetLatestRawAltitude(void)
+{
     return rangefinder.rawAltitude;
+}
+
+timeUs_t rangefinderGetLatestSampleTimeUs(void)
+{
+    return rangefinder.lastDataTimeUs;
+}
+
+timeDelta_t rangefinderGetSampleIntervalUs(void)
+{
+    return rangefinder.dataIntervalUs;
 }
 
 bool rangefinderIsHealthy(void)

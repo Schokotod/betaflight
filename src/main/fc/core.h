@@ -23,10 +23,6 @@
 #include "common/time.h"
 #include "pg/pg.h"
 
-#if defined(USE_GPS) || defined(USE_MAG)
-extern int16_t magHold;
-#endif
-
 typedef struct throttleCorrectionConfig_s {
     uint16_t throttle_correction_angle;     // the angle when the throttle correction is maximal. in 0.1 degres, ex 225 = 22.5 ,30.0, 450 = 45.0 deg
     uint8_t throttle_correction_value;      // the correction that will be applied at throttle_correction_angle.
@@ -55,6 +51,9 @@ typedef enum {
     DISARM_REASON_RUNAWAY_TAKEOFF   = 6,
     DISARM_REASON_GPS_RESCUE        = 7,
     DISARM_REASON_SERIAL_COMMAND    = 8,
+    DISARM_REASON_LANDING           = 9,
+    DISARM_REASON_CRASHFLIP         = 10,
+    DISARM_REASON_LAUNCH_ABORT      = 11,
 #ifdef UNIT_TEST
     DISARM_REASON_SYSTEM            = 255,
 #endif
@@ -82,19 +81,18 @@ void updateArmingStatus(void);
 void taskGyroSample(timeUs_t currentTimeUs);
 bool gyroFilterReady(void);
 bool pidLoopReady(void);
-bool rxFrameReady(void);
 void taskFiltering(timeUs_t currentTimeUs);
 void taskMainPidLoop(timeUs_t currentTimeUs);
 
-bool isFlipOverAfterCrashActive(void);
+bool isCrashFlipModeActive(void);
 int8_t calculateThrottlePercent(void);
 uint8_t calculateThrottlePercentAbs(void);
 bool areSticksActive(uint8_t stickPercentLimit);
 void runawayTakeoffTemporaryDisable(uint8_t disableFlag);
-bool isAirmodeActivated();
+bool wasThrottleRaised(void);
 timeUs_t getLastDisarmTimeUs(void);
-bool isTryingToArm();
-void resetTryingToArm();
+bool isTryingToArm(void);
+void resetTryingToArm(void);
 
 void subTaskTelemetryPollSensors(timeUs_t currentTimeUs);
 

@@ -21,6 +21,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
+#include <limits.h>
 
 #include "platform.h"
 
@@ -32,21 +34,27 @@
 
 #include "cms/cms.h"
 
+#include "config/config.h"
 #include "config/feature.h"
 
-#include "config/config.h"
 #include "common/crc.h"
 #include "common/maths.h"
 #include "common/printf.h"
 #include "common/streambuf.h"
+#include "common/time.h"
 #include "common/utils.h"
 
 #include "drivers/nvic.h"
+#include "drivers/persistent.h"
 
 #include "fc/rc_modes.h"
 #include "fc/runtime_config.h"
 
+#include "flight/flight_plan_nav.h"
+#include "flight/gps_rescue.h"
 #include "flight/imu.h"
+#include "flight/pid.h"
+#include "flight/pos_hold.h"
 #include "flight/position.h"
 
 #include "io/displayport_crsf.h"
@@ -60,15 +68,18 @@
 #include "rx/crsf_protocol.h"
 
 #include "sensors/battery.h"
+#include "sensors/barometer.h"
+#include "sensors/compass.h"
 #include "sensors/sensors.h"
+#include "sensors/acceleration.h"
+#include "sensors/gyro.h"
 
 #include "telemetry/telemetry.h"
 #include "telemetry/msp_shared.h"
 
 #include "crsf.h"
 
-
-#define CRSF_CYCLETIME_US                   100000 // 100ms, 10 Hz
+#define CRSF_CYCLETIME_US                   100000 // 100ms, 10 Hz -- all telemetry frames are inserted in this timeslice
 #define CRSF_DEVICEINFO_VERSION             0x01
 #define CRSF_DEVICEINFO_PARAMETER_COUNT     0
 
@@ -77,7 +88,20 @@
 
 static bool crsfTelemetryEnabled;
 static bool deviceInfoReplyPending;
+#if defined(USE_CRSF_V3)
+static bool telemetryResponsePending;
+#endif
 static uint8_t crsfFrame[CRSF_FRAME_SIZE_MAX];
+#ifdef USE_GPS
+static uint32_t lastGpsSolnTime;
+#endif
+#if defined(USE_CRSF_V3) && defined(USE_GPS)
+static timeUs_t lastGpsTimeFrameTime = (timeUs_t)(-30000000);  // Send GPS Time immediately, then every 30s thereafter while disarmed
+static uint32_t lastGpsTimeSolnTime;  // Keep separate GPS soln time to not delay normal GPS frames
+#endif
+#ifdef USE_BARO
+static uint32_t lastBaroTime;
+#endif
 
 #if defined(USE_MSP_OVER_TELEMETRY)
 typedef struct mspBuffer_s {
@@ -88,6 +112,23 @@ typedef struct mspBuffer_s {
 static mspBuffer_t mspRxBuffer;
 
 #if defined(USE_CRSF_V3)
+
+#define CRSF_TELEMETRY_FRAME_INTERVAL_MAX_US 20000U // 20ms
+
+#if defined(USE_CRSF_CMS_TELEMETRY)
+#define CRSF_LINK_TYPE_CHECK_US 250000 // 250 ms
+#define CRSF_ELRS_DISLAYPORT_CHUNK_INTERVAL_US 75000 // 75 ms
+
+typedef enum {
+    CRSF_LINK_UNKNOWN,
+    CRSF_LINK_ELRS,
+    CRSF_LINK_NOT_ELRS
+} crsfLinkType_t;
+
+static crsfLinkType_t crsfLinkType = CRSF_LINK_UNKNOWN;
+static timeDelta_t crsfDisplayPortChunkIntervalUs = 0;
+#endif
+
 static bool isCrsfV3Running = false;
 typedef struct {
     uint8_t hasPendingReply:1;
@@ -99,7 +140,19 @@ typedef struct {
 
 static crsfSpeedControl_s crsfSpeed = {0};
 
-bool checkCrsfCustomizedSpeed(void)
+uint32_t getCrsfCachedBaudrate(void)
+{
+    uint32_t crsfCachedBaudrate = persistentObjectRead(PERSISTENT_OBJECT_SERIALRX_BAUD);
+    // check if valid first. return default baudrate if not
+    for (unsigned i = 0; i < BAUD_COUNT; i++) {
+        if (crsfCachedBaudrate == baudRates[i] && baudRates[i] >= CRSF_BAUDRATE) {
+            return crsfCachedBaudrate;
+        }
+    }
+    return CRSF_BAUDRATE;
+}
+
+static bool checkCrsfCustomizedSpeed(void)
 {
     return crsfSpeed.index < BAUD_COUNT ? true : false;
 }
@@ -117,6 +170,11 @@ void setCrsfDefaultSpeed(void)
     crsfSpeed.index = BAUD_COUNT;
     isCrsfV3Running = false;
     crsfRxUpdateBaudrate(getCrsfDesiredSpeed());
+}
+
+bool crsfBaudNegotiationInProgress(void)
+{
+    return crsfSpeed.hasPendingReply || crsfSpeed.isNewSpeedValid;
 }
 #endif
 
@@ -188,6 +246,13 @@ static void crsfFinalize(sbuf_t *dst)
     crsfRxWriteTelemetryData(sbufPtr(dst), sbufBytesRemaining(dst));
 }
 
+#if defined(USE_CRSF_ACCGYRO_TELEMETRY)
+static bool crsfAccGyroEnabled(void)
+{
+    return telemetryConfig()->crsf_tlm_accgyro;
+}
+#endif
+
 /*
 CRSF frame has the structure:
 <Device address> <Frame length> <Type> <Payload> <CRC>
@@ -197,6 +262,7 @@ Type:           (uint8_t)
 CRC:            (uint8_t), crc of <Type> and <Payload>
 */
 
+#if defined(USE_GPS)
 /*
 0x02 GPS
 Payload:
@@ -207,7 +273,7 @@ uint16_t    GPS heading ( degree / 100 )
 uint16      Altitude ( meter ­1000m offset )
 uint8_t     Satellites in use ( counter )
 */
-void crsfFrameGps(sbuf_t *dst)
+MAYBE_UNUSED static void crsfFrameGps(sbuf_t *dst)
 {
     // use sbufWrite since CRC does not include frame length
     sbufWriteU8(dst, CRSF_FRAME_GPS_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
@@ -216,10 +282,163 @@ void crsfFrameGps(sbuf_t *dst)
     sbufWriteU32BigEndian(dst, gpsSol.llh.lon);
     sbufWriteU16BigEndian(dst, (gpsSol.groundSpeed * 36 + 50) / 100); // gpsSol.groundSpeed is in cm/s
     sbufWriteU16BigEndian(dst, gpsSol.groundCourse * 10); // gpsSol.groundCourse is degrees * 10
-    const uint16_t altitude = (constrain(getEstimatedAltitudeCm(), 0 * 100, 5000 * 100) / 100) + 1000; // constrain altitude from 0 to 5,000m
-    sbufWriteU16BigEndian(dst, altitude);
+    sbufWriteU16BigEndian(dst, constrain(gpsSol.llh.altCm / 100 + 1000, 0, 5000)); // constrain altitude from 0 to 5,000m
     sbufWriteU8(dst, gpsSol.numSat);
 }
+
+/*
+0x03 GPS Time
+Payload:
+    int16_t year;
+    uint8_t month;
+    uint8_t day;
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t second;
+    uint16_t millisecond;
+*/
+void crsfFrameGpsTime(sbuf_t *dst)
+{
+    sbufWriteU8(dst, CRSF_FRAME_GPS_TIME_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_GPS_TIME);
+    sbufWriteU16BigEndian(dst, (int16_t)gpsSol.dateTime.year);
+    sbufWriteU8(dst, gpsSol.dateTime.month);
+    sbufWriteU8(dst, gpsSol.dateTime.day);
+    sbufWriteU8(dst, gpsSol.dateTime.hour);
+    sbufWriteU8(dst, gpsSol.dateTime.min);
+    sbufWriteU8(dst, gpsSol.dateTime.sec);
+    sbufWriteU16BigEndian(dst, gpsSol.dateTime.millis);
+}
+
+/*
+0x06 GPS Extended
+Payload:
+    uint8_t fix_type;       // Current GPS fix quality
+    int16_t n_speed;        // Northward (north = positive) Speed [cm/sec]
+    int16_t e_speed;        // Eastward (east = positive) Speed [cm/sec]
+    int16_t v_speed;        // Vertical (up = positive) Speed [cm/sec]
+    int16_t h_speed_acc;    // Horizontal Speed accuracy cm/sec
+    int16_t track_acc;      // Heading accuracy in degrees scaled with 1e-1 degrees times 10)
+    int16_t alt_ellipsoid;  // Meters Height above GPS Ellipsoid (not MSL)
+    int16_t h_acc;          // horizontal accuracy in cm
+    int16_t v_acc;          // vertical accuracy in cm
+    uint8_t reserved;
+    uint8_t hDOP;           // Horizontal dilution of precision,Dimensionless in nits of.1.
+    uint8_t vDOP;           // vertical dilution of precision, Dimensionless in nits of .1.
+*/
+void crsfFrameGpsExtended(sbuf_t *dst)
+{
+    // Write Frame Header
+    // Length includes Type (1) + Payload (20) + CRC (1) usually,
+    // but Cleanflight sbuf logic usually takes Payload Size + Overhead constant.
+    sbufWriteU8(dst, CRSF_FRAME_GPS_EXTENDED_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_GPS_EXTENDED);
+
+    // 1. Fix Type
+    // Map existing sats/status to CRSF fix types (1=No Fix, 2=2D, 3=3D)
+    // gpsSol doesn't have an explicit fixType field, so we derive it from satellite count.
+    uint8_t gpsFixType = 0;
+
+    if (!STATE(GPS_FIX)) {
+        gpsFixType = 1;
+    } else {
+        if (gpsSol.numSat < GPS_MIN_SAT_COUNT) {
+            gpsFixType = 2;
+        } else {
+            gpsFixType = 3;
+        }
+    }
+    sbufWriteU8(dst, gpsFixType);
+
+    sbufWriteU16BigEndian(dst, gpsSol.velned.velN);
+    sbufWriteU16BigEndian(dst, gpsSol.velned.velE);
+    // Negate velD (NED down-positive to NEU up-positive), clamping to avoid overflow if velD == INT16_MIN
+    int16_t velU = (gpsSol.velned.velD == INT16_MIN) ? INT16_MAX : -gpsSol.velned.velD;
+    sbufWriteU16BigEndian(dst, velU);
+
+    // 4. Horizontal Speed Accuracy (cm/s)
+    // gpsSol.acc.sAcc is in mm/s -> divide by 10 for cm/s
+    sbufWriteU16BigEndian(dst, gpsSol.acc.sAcc / 10);
+
+    // 5. Track/Heading Accuracy (0.1 degree units)
+    // gpsSol.acc.headAcc is in 1e-5 degrees -> divide by 10000 for 0.1 degree units
+    sbufWriteU16BigEndian(dst, gpsSol.acc.headAcc / 10000);
+
+    // 6. Ellipsoid Altitude (m)
+    // gpsSol.llh.altCm is in cm -> divide by 100 for meters.
+    // Note: gpsSol altitude is typically MSL. If Ellipsoid is strictly required
+    // and geoid separation is unknown, MSL is the standard fallback.
+    sbufWriteU16BigEndian(dst, gpsSol.llh.altCm / 100);
+
+    // 7. Horizontal Accuracy (cm)
+    // gpsSol.acc.hAcc is in mm -> divide by 10 for cm
+    sbufWriteU16BigEndian(dst, gpsSol.acc.hAcc / 10);
+
+    // 8. Vertical Accuracy (cm)
+    // gpsSol.acc.vAcc is in mm -> divide by 10 for cm
+    sbufWriteU16BigEndian(dst, gpsSol.acc.vAcc / 10);
+
+    // 9. Reserved
+    sbufWriteU8(dst, 0);
+
+    // 10. Horizontal DOP (0.1 units)
+    // gpsSol.dop.hdop is scaled by 100. Divide by 10 to get 0.1 units.
+    sbufWriteU8(dst, MIN(gpsSol.dop.hdop / 10, UINT8_MAX));
+
+    // 11. Vertical DOP (0.1 units)
+    // gpsSol.dop.vdop is scaled by 100. Divide by 10 to get 0.1 units.
+    sbufWriteU8(dst, MIN(gpsSol.dop.vdop / 10, UINT8_MAX));
+}
+#endif // USE_GPS
+
+/*
+0x07 Vario sensor
+Payload:
+int16_t     Vertical speed ( cm/s )
+*/
+MAYBE_UNUSED static void crsfFrameVarioSensor(sbuf_t *dst)
+{
+    // use sbufWrite since CRC does not include frame length
+    sbufWriteU8(dst, CRSF_FRAME_VARIO_SENSOR_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_VARIO_SENSOR);
+    sbufWriteU16BigEndian(dst, getEstimatedVario()); // vario, cm/s(Z));
+}
+
+/*
+0x11 Baro
+Payload:
+int32_t     pressure pa
+int32_t     temperature centidegrees
+*/
+#if defined(USE_BARO)
+void crsfFrameBaro(sbuf_t *dst)
+{
+    // use sbufWrite since CRC does not include frame length
+    sbufWriteU8(dst, CRSF_FRAME_BARO_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_BARO);
+    sbufWriteU32BigEndian(dst, baro.pressure);
+    sbufWriteU32BigEndian(dst, baro.temperature); // CRSF and betaflight use same units for degrees
+}
+#endif
+
+#if defined(USE_MAG)
+/*
+0x12 Mag
+Payload:
+int16_t     field x mgauss * 3
+int16_t     field y mgauss * 3
+int16_t     field z mgauss * 3
+*/
+void crsfFrameMag(sbuf_t *dst)
+{
+    // use sbufWrite since CRC does not include frame length
+    sbufWriteU8(dst, CRSF_FRAME_MAG_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_MAG);
+    sbufWriteU16BigEndian(dst, (int16_t)(mag.magADC.v[X] * 3.0f));
+    sbufWriteU16BigEndian(dst, (int16_t)(mag.magADC.v[Y] * 3.0f));
+    sbufWriteU16BigEndian(dst, (int16_t)(mag.magADC.v[Z] * 3.0f));
+}
+#endif
 
 /*
 0x08 Battery sensor
@@ -229,7 +448,7 @@ uint16_t    Current ( mA * 100 )
 uint24_t    Fuel ( drawn mAh )
 uint8_t     Battery remaining ( percent )
 */
-void crsfFrameBatterySensor(sbuf_t *dst)
+static void crsfFrameBatterySensor(sbuf_t *dst)
 {
     // use sbufWrite since CRC does not include frame length
     sbufWriteU8(dst, CRSF_FRAME_BATTERY_SENSOR_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
@@ -246,6 +465,88 @@ void crsfFrameBatterySensor(sbuf_t *dst)
     sbufWriteU8(dst, (mAhDrawn >> 8));
     sbufWriteU8(dst, (uint8_t)mAhDrawn);
     sbufWriteU8(dst, batteryRemainingPercentage);
+}
+
+#if defined(USE_BARO) && defined(USE_VARIO)
+// pack altitude in decimeters into a 16-bit value.
+// Due to strange OpenTX behavior of count any 0xFFFF value as incorrect, the maximum sending value is limited to 0xFFFE (32766 meters)
+// in order to have both precision and range in 16-bit
+// value of altitude is packed with different precision depending on highest-bit value.
+// on receiving side:
+// if MSB==0, altitude is sent in decimeters as uint16 with -1000m base. So, range is -1000..2276m.
+// if MSB==1, altitude is sent in meters with 0 base. So, range is 0..32766m (MSB must be zeroed).
+// altitude lower  than -1000m is sent as zero   (should be displayed as "<-1000m" or something).
+// altitude higher than 32767m is sent as 0xfffe (should be displayed as ">32766m" or something).
+// range from 0 to 2276m might be sent with dm- or m-precision. But this function always use dm-precision.
+static inline uint16_t calcAltitudePacked(int32_t altitude_dm)
+{
+    static const int ALT_DM_OFFSET = 10000;
+    int valDm = altitude_dm + ALT_DM_OFFSET;
+
+    if (valDm < 0) return 0;   // too low, return minimum
+    if (valDm < 0x8000) return valDm;  // 15 bits to return dm value with offset
+
+    return MIN((altitude_dm + 5) / 10, 0x7fffe) | 0x8000; // positive 15bit value in meters, with OpenTX limit
+}
+
+static inline int8_t calcVerticalSpeedPacked(int16_t verticalSpeed) // Vertical speed in m/s (meters per second)
+{
+    // linearity coefficient.
+    // Bigger values lead to more linear output i.e., less precise smaller values and more precise big values.
+    // Decreasing the coefficient increases nonlinearity, i.e., more precise small values and less precise big values.
+    static const float Kl = 100.0f;
+
+    // Range coefficient is calculated as result_max / log(verticalSpeedMax * LinearityCoefficient + 1);
+    // but it must be set manually (not calculated) for equality of packing and unpacking
+    static const float Kr = .026f;
+
+    int8_t sign = verticalSpeed < 0 ? -1 : 1;
+    const int result32 = lrintf(log_approx(verticalSpeed * sign / Kl + 1) / Kr) * sign;
+    int8_t result8 = constrain(result32, SCHAR_MIN, SCHAR_MAX);
+    return result8;
+
+    // for unpacking the following function might be used:
+    // int unpacked = lrintf((expf(result8 * sign * Kr) - 1) * Kl) * sign;
+    // lrint might not be used depending on integer or floating output.
+}
+
+// pack barometric altitude
+static void crsfFrameAltitude(sbuf_t *dst)
+{
+    // use sbufWrite since CRC does not include frame length
+    sbufWriteU8(dst, CRSF_FRAME_BARO_ALTITUDE_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_BARO_ALTITUDE);
+    sbufWriteU16BigEndian(dst, calcAltitudePacked((baro.altitude + 5) / 10));
+    sbufWriteU8(dst, calcVerticalSpeedPacked(getEstimatedVario()));
+}
+#endif
+
+/*
+0x0B Heartbeat
+Payload:
+int16_t    origin_add ( Origin Device address )
+*/
+
+MAYBE_UNUSED static void crsfFrameHeartbeat(sbuf_t *dst)
+{
+    sbufWriteU8(dst, CRSF_FRAME_HEARTBEAT_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_HEARTBEAT);
+    sbufWriteU16BigEndian(dst, CRSF_ADDRESS_FLIGHT_CONTROLLER);
+}
+
+/*
+0x28 Ping
+Payload:
+int8_t    destination_add ( Destination Device address )
+int8_t    origin_add ( Origin Device address )
+*/
+
+MAYBE_UNUSED static void crsfFramePing(sbuf_t *dst)
+{
+    sbufWriteU8(dst, CRSF_FRAME_DEVICE_PING_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_DEVICE_PING);
+    sbufWriteU8(dst, CRSF_ADDRESS_CRSF_RECEIVER);
+    sbufWriteU8(dst, CRSF_ADDRESS_FLIGHT_CONTROLLER);
 }
 
 typedef enum {
@@ -292,13 +593,13 @@ static int16_t decidegrees2Radians10000(int16_t angle_decidegree)
 }
 
 // fill dst buffer with crsf-attitude telemetry frame
-void crsfFrameAttitude(sbuf_t *dst)
+static void crsfFrameAttitude(sbuf_t *dst)
 {
-     sbufWriteU8(dst, CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
-     sbufWriteU8(dst, CRSF_FRAMETYPE_ATTITUDE);
-     sbufWriteU16BigEndian(dst, decidegrees2Radians10000(attitude.values.pitch));
-     sbufWriteU16BigEndian(dst, decidegrees2Radians10000(attitude.values.roll));
-     sbufWriteU16BigEndian(dst, decidegrees2Radians10000(attitude.values.yaw));
+    sbufWriteU8(dst, CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE + CRSF_FRAME_LENGTH_TYPE_CRC);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_ATTITUDE);
+    sbufWriteU16BigEndian(dst, decidegrees2Radians10000(attitude.values.pitch));
+    sbufWriteU16BigEndian(dst, decidegrees2Radians10000(attitude.values.roll));
+    sbufWriteU16BigEndian(dst, decidegrees2Radians10000(attitude.values.yaw));
 }
 
 /*
@@ -306,7 +607,7 @@ void crsfFrameAttitude(sbuf_t *dst)
 Payload:
 char[]      Flight mode ( Null terminated string )
 */
-void crsfFrameFlightMode(sbuf_t *dst)
+static void crsfFrameFlightMode(sbuf_t *dst)
 {
     // write zero for frame length, since we don't know it yet
     uint8_t *lengthPtr = sbufPtr(dst);
@@ -316,36 +617,46 @@ void crsfFrameFlightMode(sbuf_t *dst)
     // Acro is the default mode
     const char *flightMode = "ACRO";
 
-    // Modes that are only relevant when disarmed
-    if (!ARMING_FLAG(ARMED) && isArmingDisabled()) {
-        flightMode = "!ERR";
-    } else
-
-#if defined(USE_GPS)
-    if (!ARMING_FLAG(ARMED) && featureIsEnabled(FEATURE_GPS) && (!STATE(GPS_FIX) || !STATE(GPS_FIX_HOME))) {
-        flightMode = "WAIT"; // Waiting for GPS lock
-    } else
-#endif
-
     // Flight modes in decreasing order of importance
-    if (FLIGHT_MODE(FAILSAFE_MODE)) {
+    if (FLIGHT_MODE(FAILSAFE_MODE) || IS_RC_MODE_ACTIVE(BOXFAILSAFE)) {
         flightMode = "!FS!";
-    } else if (FLIGHT_MODE(GPS_RESCUE_MODE)) {
+    } else if (FLIGHT_MODE(GPS_RESCUE_MODE) || IS_RC_MODE_ACTIVE(BOXGPSRESCUE) || flightPlanNavIsRescuePlanActive()) {
         flightMode = "RTH";
     } else if (FLIGHT_MODE(PASSTHRU_MODE)) {
-        flightMode = "MANU";
+        flightMode = "PASS";
+    // Position Hold and Altitude Hold both force Angle mode on, so both must be tested before it, otherwise their branches are unreachable
+    } else if (FLIGHT_MODE(POS_HOLD_MODE)) {
+#ifdef USE_POSITION_HOLD
+        flightMode = posHoldFailure() ? "PHFL" : "POSH";
+#else
+        flightMode = "POSH";
+#endif
+    } else if (FLIGHT_MODE(ALT_HOLD_MODE)) {
+        flightMode = "ALTH";
     } else if (FLIGHT_MODE(ANGLE_MODE)) {
-        flightMode = "STAB";
+        flightMode = "ANGL";
     } else if (FLIGHT_MODE(HORIZON_MODE)) {
         flightMode = "HOR";
-    } else if (airmodeIsEnabled()) {
+    } else if (FLIGHT_MODE(CHIRP_MODE)) {
+        flightMode = "CHIR";
+    } else if (isAirmodeEnabled()) {
         flightMode = "AIR";
     }
 
     sbufWriteString(dst, flightMode);
-    if (!ARMING_FLAG(ARMED)) {
-        sbufWriteU8(dst, '*');
+
+    if (!ARMING_FLAG(ARMED) && !FLIGHT_MODE(FAILSAFE_MODE)) {
+        // * = ready to arm
+        // ! = arming disabled
+        // ? = GPS rescue disabled
+#if defined(USE_GPS) && defined(USE_GPS_RESCUE)
+        bool isGpsRescueDisabled = featureIsEnabled(FEATURE_GPS) && gpsRescueIsConfigured() && gpsSol.numSat < gpsRescueConfig()->minSats && !STATE(GPS_FIX);
+#else
+        bool isGpsRescueDisabled = false;
+#endif
+        sbufWriteU8(dst, isArmingDisabled() ? '!' : isGpsRescueDisabled ? '?' : '*');
     }
+
     sbufWriteU8(dst, '\0');     // zero-terminate string
     // write in the frame length
     *lengthPtr = sbufPtr(dst) - lengthPtr;
@@ -363,10 +674,14 @@ uint32_t    Null Bytes
 uint8_t     255 (Max MSP Parameter)
 uint8_t     0x01 (Parameter version 1)
 */
-void crsfFrameDeviceInfo(sbuf_t *dst)
+static void crsfFrameDeviceInfo(sbuf_t *dst)
 {
-    char buff[30];
-    tfp_sprintf(buff, "%s %s: %s", FC_FIRMWARE_NAME, FC_VERSION_STRING, systemConfig()->boardIdentifier);
+    // tfp_sprintf() is unbounded, so size the buffer from the parts that go into it.
+    // The version string is deliberately left out: with calver plus an optional suffix
+    // (e.g. "2026.12.0-alpha") the name no longer fits, and it is of little use in the
+    // transmitter's device list anyway.
+    char buff[sizeof(FC_FIRMWARE_NAME ": ") + sizeof(systemConfig()->boardIdentifier)];
+    tfp_sprintf(buff, "%s: %s", FC_FIRMWARE_NAME, systemConfig()->boardIdentifier);
 
     uint8_t *lengthPtr = sbufPtr(dst);
     sbufWriteU8(dst, 0);
@@ -382,9 +697,8 @@ void crsfFrameDeviceInfo(sbuf_t *dst)
     *lengthPtr = sbufPtr(dst) - lengthPtr;
 }
 
-
 #if defined(USE_CRSF_V3)
-void crsfFrameSpeedNegotiationResponse(sbuf_t *dst, bool reply)
+static void crsfFrameSpeedNegotiationResponse(sbuf_t *dst, bool reply)
 {
     uint8_t *lengthPtr = sbufPtr(dst);
     sbufWriteU8(dst, 0);
@@ -399,7 +713,7 @@ void crsfFrameSpeedNegotiationResponse(sbuf_t *dst, bool reply)
     *lengthPtr = sbufPtr(dst) - lengthPtr;
 }
 
-static void crsfProcessSpeedNegotiationCmd(uint8_t *frameStart)
+static void crsfProcessSpeedNegotiationCmd(const uint8_t *frameStart)
 {
     uint32_t newBaudrate = frameStart[2] << 24 | frameStart[3] << 16 | frameStart[4] << 8 | frameStart[5];
     uint8_t ii = 0;
@@ -412,47 +726,125 @@ static void crsfProcessSpeedNegotiationCmd(uint8_t *frameStart)
     crsfSpeed.index = ii;
 }
 
-void crsfScheduleSpeedNegotiationResponse(void)
+static void crsfScheduleSpeedNegotiationResponse(void)
 {
     crsfSpeed.hasPendingReply = true;
     crsfSpeed.isNewSpeedValid = false;
 }
 
-void speedNegotiationProcess(uint32_t currentTime)
+void speedNegotiationProcess(timeUs_t currentTimeUs)
 {
-    if (!featureIsEnabled(FEATURE_TELEMETRY) && getCrsfDesiredSpeed() == CRSF_BAUDRATE) {
-        // to notify the RX to fall back to default baud rate by sending device info frame if telemetry is disabled
-        sbuf_t crsfPayloadBuf;
-        sbuf_t *dst = &crsfPayloadBuf;
+    if (crsfSpeed.hasPendingReply) {
+        bool found = ((crsfSpeed.index < BAUD_COUNT) && crsfRxUseNegotiatedBaud()) ? true : false;
+        sbuf_t crsfSpeedNegotiationBuf;
+        sbuf_t *dst = &crsfSpeedNegotiationBuf;
         crsfInitializeFrame(dst);
-        crsfFrameDeviceInfo(dst);
+        crsfFrameSpeedNegotiationResponse(dst, found);
         crsfRxSendTelemetryData(); // prevent overwriting previous data
         crsfFinalize(dst);
         crsfRxSendTelemetryData();
-    } else {
-        if (crsfSpeed.hasPendingReply) {
-            bool found = ((crsfSpeed.index < BAUD_COUNT) && crsfRxUseNegotiatedBaud()) ? true : false;
-            sbuf_t crsfSpeedNegotiationBuf;
-            sbuf_t *dst = &crsfSpeedNegotiationBuf;
+        crsfSpeed.hasPendingReply = false;
+        crsfSpeed.isNewSpeedValid = found;
+        crsfSpeed.confirmationTime = currentTimeUs;
+    } else if (crsfSpeed.isNewSpeedValid) {
+        if (cmpTimeUs(currentTimeUs, crsfSpeed.confirmationTime) >= 4000) {
+            // delay 4ms before applying the new baudrate
+            crsfRxUpdateBaudrate(getCrsfDesiredSpeed());
+            crsfSpeed.isNewSpeedValid = false;
+            isCrsfV3Running = true;
+        }
+    } else if (!featureIsEnabled(FEATURE_TELEMETRY) && crsfRxUseNegotiatedBaud()) {
+        // Send heartbeat if telemetry is disabled to allow RX to detect baud rate mismatches
+        sbuf_t crsfPayloadBuf;
+        sbuf_t *dst = &crsfPayloadBuf;
+        crsfInitializeFrame(dst);
+        crsfFrameHeartbeat(dst);
+        crsfRxSendTelemetryData(); // prevent overwriting previous data
+        crsfFinalize(dst);
+        crsfRxSendTelemetryData();
+#if defined(USE_CRSF_CMS_TELEMETRY)
+    } else if (crsfLinkType == CRSF_LINK_UNKNOWN) {
+        static timeUs_t lastPing;
+
+        if ((cmpTimeUs(currentTimeUs, lastPing) > CRSF_LINK_TYPE_CHECK_US)) {
+            // Send a ping, the response to which will be a device info response giving the rx serial number
+            sbuf_t crsfPayloadBuf;
+            sbuf_t *dst = &crsfPayloadBuf;
             crsfInitializeFrame(dst);
-            crsfFrameSpeedNegotiationResponse(dst, found);
+            crsfFramePing(dst);
             crsfRxSendTelemetryData(); // prevent overwriting previous data
             crsfFinalize(dst);
             crsfRxSendTelemetryData();
-            crsfSpeed.hasPendingReply = false;
-            crsfSpeed.isNewSpeedValid = found;
-            crsfSpeed.confirmationTime = currentTime;
-            return;
-        } else if (crsfSpeed.isNewSpeedValid) {
-            if (currentTime - crsfSpeed.confirmationTime >= 4000) {
-                // delay 4ms before applying the new baudrate
-                crsfRxUpdateBaudrate(getCrsfDesiredSpeed());
-                crsfSpeed.isNewSpeedValid = false;
-                isCrsfV3Running = true;
-                return;
-            }
+
+            lastPing = currentTimeUs;
         }
+#endif
     }
+}
+#endif
+
+#if defined(USE_CRSF_ACCGYRO_TELEMETRY)
+/*
+0x13 AccGyro in NEU bodyframe, samples are raw data averaged over the sample interval
+Accel: +ve X = foward
+       +ve Y = right
+       +ve Z = up
+Gyro:  +ve X = roll left
+       +ve Y = pitch up
+       +ve Z = yaw clockwise
+Payload:
+    uint32_t sample_time;       // Timestamp of the sample in us
+    int16_t gyro_x;             // LSB = INT16_MAX/2000 DPS
+    int16_t gyro_y;             // LSB = INT16_MAX/2000 DPS
+    int16_t gyro_z;             // LSB = INT16_MAX/2000 DPS
+    int16_t acc_x;              // LSB = INT16_MAX/16 G
+    int16_t acc_y;              // LSB = INT16_MAX/16 G
+    int16_t acc_z;              // LSB = INT16_MAX/16 G
+    int16_t gyro_temp;          // C * 100
+*/
+bool crsfFrameAccGyro(sbuf_t *dst, timeUs_t currentTimeUs)
+{
+    // Capture any pending gyro samples into snapshot
+    const bool hasNewGyroData = gyroStartDownsampledCycle();
+
+    // Only send if we have gyro data
+    if (!hasNewGyroData) {
+        return false;
+    }
+
+    // Read gyro data from snapshot
+    float gyroAverage[XYZ_AXIS_COUNT];
+    for (int axis = 0; axis < XYZ_AXIS_COUNT; ++axis) {
+        gyroAverage[axis] = gyroGetDownsampled(axis);
+    }
+
+    // Capture accel if available, use previous snapshot if not
+    accelStartDownsampledCycle();
+    float accAverage[XYZ_AXIS_COUNT];
+    for (int axis = 0; axis < XYZ_AXIS_COUNT; ++axis) {
+        accAverage[axis] = accelGetDownsampled(axis) * acc.dev.acc_1G_rec * G_ACCELERATION;
+    }
+
+// Convert dps 'x' (max ±2000) to 16-bit integer (max ±32767), clamped to prevent overflow
+#define DEGREES_TO_2KDPS16BIT(x) (int16_t)((constrainf((x), -2000.0f, 2000.0f) * INT16_MAX) / 2000.0f)
+// Convert acceleration 'x' in m/s^2 (max ±16*g) to 16-bit integer (max ±32767), clamped to prevent overflow
+#define ACCMSS_TO_16G16BIT(x) (int16_t)((constrainf((x), -16.0f * G_ACCELERATION, 16.0f * G_ACCELERATION) * INT16_MAX) / (16.0f * G_ACCELERATION))
+
+    uint8_t *lengthPtr = sbufPtr(dst);
+    sbufWriteU8(dst, 0);
+    sbufWriteU8(dst, CRSF_FRAMETYPE_ACCGYRO);
+    sbufWriteU32BigEndian(dst, currentTimeUs);
+    sbufWriteU16BigEndian(dst, DEGREES_TO_2KDPS16BIT(gyroAverage[X]));
+    sbufWriteU16BigEndian(dst, DEGREES_TO_2KDPS16BIT(-gyroAverage[Y]));
+    sbufWriteU16BigEndian(dst, DEGREES_TO_2KDPS16BIT(-gyroAverage[Z]));
+    sbufWriteU16BigEndian(dst, ACCMSS_TO_16G16BIT(accAverage[X]));
+    sbufWriteU16BigEndian(dst, ACCMSS_TO_16G16BIT(-accAverage[Y]));
+    sbufWriteU16BigEndian(dst, ACCMSS_TO_16G16BIT(-accAverage[Z]));
+    // Temperature in centidegrees, clamped to int16 range (-327 to +327°C)
+    sbufWriteU16BigEndian(dst, constrain(gyroGetTemperature() * 100, INT16_MIN, INT16_MAX));
+    *lengthPtr = sbufPtr(dst) - lengthPtr;
+
+    return true;
 }
 #endif
 
@@ -549,14 +941,31 @@ static void crsfFrameDisplayPortClear(sbuf_t *dst)
 typedef enum {
     CRSF_FRAME_START_INDEX = 0,
     CRSF_FRAME_ATTITUDE_INDEX = CRSF_FRAME_START_INDEX,
+    CRSF_FRAME_BARO_ALTITUDE_INDEX,
     CRSF_FRAME_BATTERY_SENSOR_INDEX,
     CRSF_FRAME_FLIGHT_MODE_INDEX,
+    CRSF_FRAME_MAG_INDEX,
     CRSF_FRAME_GPS_INDEX,
+    CRSF_FRAME_VARIO_SENSOR_INDEX,
+    CRSF_FRAME_HEARTBEAT_INDEX,
+    CRSF_FRAME_BARO_SENSOR_INDEX,     // raw baro frame for non-V3 builds (must not collide with other indices)
     CRSF_SCHEDULE_COUNT_MAX
 } crsfFrameTypeIndex_e;
 
+typedef enum {
+    CRSF_TIMED_FRAME_GPS_INDEX,       // timed GPS frame (distinct from crsfFrameTypeIndex_e)
+    CRSF_TIMED_FRAME_GPS_TIME_INDEX,
+    CRSF_TIMED_FRAME_GPS_EXTENDED_INDEX,
+    CRSF_TIMED_FRAME_BARO_INDEX,
+#ifdef USE_CRSF_ACCGYRO_TELEMETRY
+    CRSF_TIMED_FRAME_ACCGYRO_INDEX,
+#endif
+    CRSF_TIMED_SCHEDULE_COUNT_MAX
+} crsfTimedFrameTypeIndex_e;
+
 static uint8_t crsfScheduleCount;
-static uint8_t crsfSchedule[CRSF_SCHEDULE_COUNT_MAX];
+static uint16_t crsfSchedule[CRSF_SCHEDULE_COUNT_MAX];
+static uint16_t crsfTimedSchedule;
 
 #if defined(USE_MSP_OVER_TELEMETRY)
 
@@ -567,6 +976,15 @@ void crsfScheduleMspResponse(uint8_t requestOriginID)
 {
     mspReplyPending = true;
     mspRequestOriginID = requestOriginID;
+}
+
+// mspReplyPending is cleared when a reply finishes, even if more requests were buffered while it
+// was being sent, and the receive ISR can set it again just before that clear. Requests stay in
+// mspRxBuffer until they are handled, so also check the buffer: otherwise they are stranded, and
+// once the buffer fills nothing can schedule MSP processing again until the FC is rebooted.
+static bool crsfMspPending(void)
+{
+    return mspReplyPending || mspRxBuffer.len > 0;
 }
 
 // sends MSP response chunk over CRSF. Must be of type mspResponseFnPtr
@@ -585,24 +1003,76 @@ static void crsfSendMspResponse(uint8_t *payload, const uint8_t payloadSize)
 }
 #endif
 
-static void processCrsf(void)
+static bool processCrsf(uint32_t currentTimeUs, uint32_t crsfLastCycleTime)
 {
-    if (!crsfRxIsTelemetryBufEmpty()) {
-        return; // do nothing if telemetry ouptut buffer is not empty yet.
+    sbuf_t crsfPayloadBuf;
+    sbuf_t *dst = &crsfPayloadBuf;
+
+#ifdef USE_GPS
+#if defined(USE_CRSF_V3)
+    if (crsfTimedSchedule & BIT(CRSF_TIMED_FRAME_GPS_TIME_INDEX) && !ARMING_FLAG(ARMED) && gpsSol.dateTime.valid && gpsSol.time != lastGpsTimeSolnTime && cmpTimeUs(currentTimeUs, lastGpsTimeFrameTime) > 30000000) { // Removed isCrsfV3Running check from GPS Time 0x03 message as it requires baudrate negotiation which ELRS does not perform
+        crsfInitializeFrame(dst);
+        crsfFrameGpsTime(dst);
+        crsfFinalize(dst);
+        lastGpsTimeSolnTime = gpsSol.time;
+        lastGpsTimeFrameTime = currentTimeUs;
+        return true;
+    }
+    if (isCrsfV3Running && crsfTimedSchedule & BIT(CRSF_TIMED_FRAME_GPS_EXTENDED_INDEX) && gpsSol.time != lastGpsSolnTime) {
+        crsfInitializeFrame(dst);
+        crsfFrameGpsExtended(dst);
+        crsfFinalize(dst);
+        crsfTimedSchedule &= ~BIT(CRSF_TIMED_FRAME_GPS_EXTENDED_INDEX);    // tick-tock between GPS frames
+        return true;
+    }
+#endif
+    if (crsfTimedSchedule & BIT(CRSF_TIMED_FRAME_GPS_INDEX) && gpsSol.time != lastGpsSolnTime) {
+        crsfInitializeFrame(dst);
+        crsfFrameGps(dst);
+        crsfFinalize(dst);
+#if defined(USE_CRSF_V3)
+        if (isCrsfV3Running) {
+            crsfTimedSchedule |= (BIT(CRSF_TIMED_FRAME_GPS_EXTENDED_INDEX) | BIT(CRSF_TIMED_FRAME_GPS_TIME_INDEX));
+        }
+#endif
+        lastGpsSolnTime = gpsSol.time;
+        return true;
+    }
+#endif
+#if defined(USE_BARO)
+    if (crsfTimedSchedule & BIT(CRSF_TIMED_FRAME_BARO_INDEX) && cmpTimeUs(currentTimeUs, lastBaroTime) > 100000) { // 10Hz baro update
+        crsfInitializeFrame(dst);
+        crsfFrameBaro(dst);
+        crsfFinalize(dst);
+        lastBaroTime = currentTimeUs;
+        return true;
+    }
+#endif
+
+    if (crsfScheduleCount == 0) {
+        return false;
+    }
+
+    if (currentTimeUs < crsfLastCycleTime + CRSF_CYCLETIME_US / crsfScheduleCount) {
+        return false;
     }
 
     static uint8_t crsfScheduleIndex = 0;
-
-    const uint8_t currentSchedule = crsfSchedule[crsfScheduleIndex];
-
-    sbuf_t crsfPayloadBuf;
-    sbuf_t *dst = &crsfPayloadBuf;
+    const uint16_t currentSchedule = crsfSchedule[crsfScheduleIndex];
 
     if (currentSchedule & BIT(CRSF_FRAME_ATTITUDE_INDEX)) {
         crsfInitializeFrame(dst);
         crsfFrameAttitude(dst);
         crsfFinalize(dst);
     }
+#if defined(USE_BARO) && defined(USE_VARIO)
+    // send barometric altitude
+    if (currentSchedule & BIT(CRSF_FRAME_BARO_ALTITUDE_INDEX)) {
+        crsfInitializeFrame(dst);
+        crsfFrameAltitude(dst);
+        crsfFinalize(dst);
+    }
+#endif
     if (currentSchedule & BIT(CRSF_FRAME_BATTERY_SENSOR_INDEX)) {
         crsfInitializeFrame(dst);
         crsfFrameBatterySensor(dst);
@@ -614,6 +1084,20 @@ static void processCrsf(void)
         crsfFrameFlightMode(dst);
         crsfFinalize(dst);
     }
+#if defined(USE_BARO) && !defined(USE_CRSF_V3)
+    if (currentSchedule & BIT(CRSF_FRAME_BARO_SENSOR_INDEX)) {
+        crsfInitializeFrame(dst);
+        crsfFrameBaro(dst);
+        crsfFinalize(dst);
+    }
+#endif
+#if defined(USE_MAG)
+    if (currentSchedule & BIT(CRSF_FRAME_MAG_INDEX)) {
+        crsfInitializeFrame(dst);
+        crsfFrameMag(dst);
+        crsfFinalize(dst);
+    }
+#endif
 #ifdef USE_GPS
     if (currentSchedule & BIT(CRSF_FRAME_GPS_INDEX)) {
         crsfInitializeFrame(dst);
@@ -621,13 +1105,93 @@ static void processCrsf(void)
         crsfFinalize(dst);
     }
 #endif
+#ifdef USE_VARIO
+    if (currentSchedule & BIT(CRSF_FRAME_VARIO_SENSOR_INDEX)) {
+        crsfInitializeFrame(dst);
+        crsfFrameVarioSensor(dst);
+        crsfFinalize(dst);
+    }
+#endif
+#if defined(USE_CRSF_V3)
+    if (currentSchedule & BIT(CRSF_FRAME_HEARTBEAT_INDEX)) {
+        crsfInitializeFrame(dst);
+        crsfFrameHeartbeat(dst);
+        crsfFinalize(dst);
+    }
+#endif
+
     crsfScheduleIndex = (crsfScheduleIndex + 1) % crsfScheduleCount;
+
+    return true;
 }
 
 void crsfScheduleDeviceInfoResponse(void)
 {
     deviceInfoReplyPending = true;
 }
+
+#if defined(USE_CRSF_V3)
+FAST_CODE void crsfScheduleTelemetryResponse(void)
+{
+    telemetryResponsePending = true;
+}
+
+// Scheduler check function for event-driven telemetry.
+// Cap TASK_TELEMETRY wake-ups at 50Hz so high RC link rates (e.g. 250Hz ELRS)
+// cannot wake the scheduler faster than it produces frames, which otherwise
+// starves time-critical tasks (PID/motor write). Each sensor frame type is
+// sent at most once per CRSF_CYCLETIME_US (100ms), so 50Hz task wakes are
+// sufficient to transmit all types on schedule.
+// Latency-sensitive ad-hoc responses (MSP-over-telemetry, device info) bypass
+// the cap so they still drain at the inbound frame rate.
+bool crsfTelemetryUpdateCheck(timeUs_t currentTimeUs, timeDelta_t currentDeltaTimeUs)
+{
+    UNUSED(currentDeltaTimeUs);
+
+    // Ad-hoc replies span several CRSF payloads and need one task run per chunk, so they are
+    // exempt from both the rate limit and telemetryResponsePending.
+#if defined(USE_MSP_OVER_TELEMETRY)
+    if (crsfMspPending()) {
+        return true;
+    }
+#endif
+    if (deviceInfoReplyPending) {
+        return true;
+    }
+
+    if (!telemetryResponsePending) {
+        return false;
+    }
+
+    static timeUs_t lastTelemetryCheckTimeUs = 0;
+    if (cmpTimeUs(currentTimeUs, lastTelemetryCheckTimeUs) < (timeDelta_t)CRSF_TELEMETRY_FRAME_INTERVAL_MAX_US) {
+        return false;
+    }
+
+    lastTelemetryCheckTimeUs = currentTimeUs;
+    return true;
+}
+
+#endif
+
+#if defined(USE_CRSF_CMS_TELEMETRY)
+void crsfHandleDeviceInfoResponse(uint8_t *payload)
+{
+    // Skip over dst/src address bytes
+    payload += 2;
+
+    // Skip over first string which is the rx model/part number
+    while (*payload++ != '\0');
+
+    // Check the serial number
+    if (memcmp(payload, "ELRS", 4) == 0) {
+        crsfLinkType = CRSF_LINK_ELRS;
+        crsfDisplayPortChunkIntervalUs = CRSF_ELRS_DISLAYPORT_CHUNK_INTERVAL_US;
+    } else {
+        crsfLinkType = CRSF_LINK_NOT_ELRS;
+    }
+}
+#endif
 
 void initCrsfTelemetry(void)
 {
@@ -640,14 +1204,23 @@ void initCrsfTelemetry(void)
     }
 
     deviceInfoReplyPending = false;
+#if defined(USE_CRSF_V3)
+    telemetryResponsePending = false;
+#endif
 #if defined(USE_MSP_OVER_TELEMETRY)
     mspReplyPending = false;
 #endif
+    crsfTimedSchedule = 0;
 
-    int index = 0;
+    uint8_t index = 0;
     if (sensors(SENSOR_ACC) && telemetryIsSensorEnabled(SENSOR_PITCH | SENSOR_ROLL | SENSOR_HEADING)) {
         crsfSchedule[index++] = BIT(CRSF_FRAME_ATTITUDE_INDEX);
     }
+#if defined(USE_BARO) && defined(USE_VARIO)
+    if (telemetryIsSensorEnabled(SENSOR_ALTITUDE)) {
+        crsfSchedule[index++] = BIT(CRSF_FRAME_BARO_ALTITUDE_INDEX);
+    }
+#endif
     if ((isBatteryVoltageConfigured() && telemetryIsSensorEnabled(SENSOR_VOLTAGE))
         || (isAmperageConfigured() && telemetryIsSensorEnabled(SENSOR_CURRENT | SENSOR_FUEL))) {
         crsfSchedule[index++] = BIT(CRSF_FRAME_BATTERY_SENSOR_INDEX);
@@ -655,13 +1228,51 @@ void initCrsfTelemetry(void)
     if (telemetryIsSensorEnabled(SENSOR_MODE)) {
         crsfSchedule[index++] = BIT(CRSF_FRAME_FLIGHT_MODE_INDEX);
     }
+#ifdef USE_BARO
+    if (sensors(SENSOR_BARO)) {
+#ifdef USE_CRSF_V3
+        crsfTimedSchedule |= BIT(CRSF_TIMED_FRAME_BARO_INDEX);
+#else
+        crsfSchedule[index++] = BIT(CRSF_FRAME_BARO_SENSOR_INDEX);
+#endif
+    }
+#endif
+#if defined(USE_MAG)
+    if (sensors(SENSOR_MAG)) {
+        crsfSchedule[index++] = BIT(CRSF_FRAME_MAG_INDEX);
+    }
+#endif
 #ifdef USE_GPS
     if (featureIsEnabled(FEATURE_GPS)
        && telemetryIsSensorEnabled(SENSOR_ALTITUDE | SENSOR_LAT_LONG | SENSOR_GROUND_SPEED | SENSOR_HEADING)) {
+#ifdef USE_CRSF_V3
+        crsfTimedSchedule |= BIT(CRSF_TIMED_FRAME_GPS_INDEX) | BIT(CRSF_TIMED_FRAME_GPS_TIME_INDEX) | BIT(CRSF_TIMED_FRAME_GPS_EXTENDED_INDEX);
+#else
         crsfSchedule[index++] = BIT(CRSF_FRAME_GPS_INDEX);
+#endif
     }
 #endif
-    crsfScheduleCount = (uint8_t)index;
+#if defined(USE_CRSF_ACCGYRO_TELEMETRY) && defined(USE_CRSF_V3)
+    if (crsfAccGyroEnabled() && (sensors(SENSOR_ACC) || sensors(SENSOR_GYRO))) {
+        crsfTimedSchedule |= BIT(CRSF_TIMED_FRAME_ACCGYRO_INDEX);
+    }
+#endif
+#ifdef USE_VARIO
+    if ((sensors(SENSOR_BARO) || featureIsEnabled(FEATURE_GPS)) && telemetryIsSensorEnabled(SENSOR_VARIO)) {
+        crsfSchedule[index++] = BIT(CRSF_FRAME_VARIO_SENSOR_INDEX);
+    }
+#endif
+
+#if defined(USE_CRSF_V3)
+    if (!(crsfTimedSchedule & BIT(CRSF_TIMED_FRAME_ACCGYRO_INDEX))) {
+        while (index < (CRSF_CYCLETIME_US / CRSF_TELEMETRY_FRAME_INTERVAL_MAX_US) && index < CRSF_SCHEDULE_COUNT_MAX) {
+            // schedule heartbeat to ensure that telemetry/heartbeat frames are sent at minimum 50Hz
+            crsfSchedule[index++] = BIT(CRSF_FRAME_HEARTBEAT_INDEX);
+        }
+    }
+#endif
+
+    crsfScheduleCount = index;
 
 #if defined(USE_CRSF_CMS_TELEMETRY)
     crsfDisplayportRegister();
@@ -730,16 +1341,28 @@ void handleCrsfTelemetry(timeUs_t currentTimeUs)
     if (!crsfTelemetryEnabled) {
         return;
     }
+
+#if defined(USE_CRSF_V3)
+    if (crsfBaudNegotiationInProgress()) {
+        return;
+    }
+#endif
+
     // Give the receiver a chance to send any outstanding telemetry data.
     // This needs to be done at high frequency, to enable the RX to send the telemetry frame
     // in between the RX frames.
     crsfRxSendTelemetryData();
 
-    // Send ad-hoc response frames as soon as possible
+    // Send ad-hoc response frames as soon as possible, ahead of the gate below: a chunked reply
+    // needs one pass per chunk, and inbound frames can be too sparse to clock them out. ELRS
+    // WiFi passthrough has no RC link, so its only inbound frames are the MSP requests themselves.
 #if defined(USE_MSP_OVER_TELEMETRY)
-    if (mspReplyPending) {
+    if (crsfMspPending()) {
         mspReplyPending = handleCrsfMspFrameBuffer(&crsfSendMspResponse);
         crsfLastCycleTime = currentTimeUs; // reset telemetry timing due to ad-hoc request
+#if defined(USE_CRSF_V3)
+        telemetryResponsePending = false;
+#endif
         return;
     }
 #endif
@@ -751,9 +1374,21 @@ void handleCrsfTelemetry(timeUs_t currentTimeUs)
         crsfFrameDeviceInfo(dst);
         crsfFinalize(dst);
         deviceInfoReplyPending = false;
+#if defined(USE_CRSF_V3)
+        telemetryResponsePending = false;
+#endif
         crsfLastCycleTime = currentTimeUs; // reset telemetry timing due to ad-hoc request
         return;
     }
+
+#if defined(USE_CRSF_V3)
+    // Only send periodic telemetry on receipt of a full frame, so the telemetry rate is never
+    // faster than the frame rate. Skipped on fixed-rate links, where it would instead throttle
+    // telemetry down to the inbound frame rate.
+    if (crsfRxIsEventDrivenTelemetry() && !telemetryResponsePending) {
+        return;
+    }
+#endif
 
 #if defined(USE_CRSF_CMS_TELEMETRY)
     if (crsfDisplayPortScreen()->reset) {
@@ -764,38 +1399,72 @@ void handleCrsfTelemetry(timeUs_t currentTimeUs)
         crsfFrameDisplayPortClear(dst);
         crsfFinalize(dst);
         crsfLastCycleTime = currentTimeUs;
+#if defined(USE_CRSF_V3)
+        telemetryResponsePending = false;
+#endif
         return;
     }
-    static uint8_t displayPortBatchId = 0;
-    if (crsfDisplayPortIsReady() && crsfDisplayPortScreen()->updated) {
-        crsfDisplayPortScreen()->updated = false;
-        uint16_t screenSize = crsfDisplayPortScreen()->rows * crsfDisplayPortScreen()->cols;
-        uint8_t *srcStart = (uint8_t*)crsfDisplayPortScreen()->buffer;
-        uint8_t *srcEnd = (uint8_t*)(crsfDisplayPortScreen()->buffer + screenSize);
-        sbuf_t displayPortSbuf;
-        sbuf_t *src = sbufInit(&displayPortSbuf, srcStart, srcEnd);
+
+    if (crsfDisplayPortIsReady()) {
+        static uint8_t displayPortBatchId = 0;
+        static sbuf_t displayPortSbuf;
+        static sbuf_t *src = NULL;
+        static uint8_t batchIndex;
+        static timeUs_t batchLastTimeUs;
         sbuf_t crsfDisplayPortBuf;
         sbuf_t *dst = &crsfDisplayPortBuf;
-        displayPortBatchId = (displayPortBatchId  + 1) % CRSF_DISPLAYPORT_BATCH_MAX;
-        uint8_t i = 0;
-        while (sbufBytesRemaining(src)) {
+
+        if (crsfDisplayPortScreen()->updated) {
+            crsfDisplayPortScreen()->updated = false;
+            uint16_t screenSize = crsfDisplayPortScreen()->rows * crsfDisplayPortScreen()->cols;
+            uint8_t *srcStart = (uint8_t*)crsfDisplayPortScreen()->buffer;
+            uint8_t *srcEnd = (uint8_t*)(crsfDisplayPortScreen()->buffer + screenSize);
+            src = sbufInit(&displayPortSbuf, srcStart, srcEnd);
+            displayPortBatchId = (displayPortBatchId  + 1) % CRSF_DISPLAYPORT_BATCH_MAX;
+            batchIndex = 0;
+        }
+
+        // Wait between successive chunks of displayport data for CMS menu display to prevent ELRS buffer over-run if necessary
+        if (src && sbufBytesRemaining(src) &&
+            (cmpTimeUs(currentTimeUs, batchLastTimeUs) > crsfDisplayPortChunkIntervalUs)) {
             crsfInitializeFrame(dst);
-            crsfFrameDisplayPortChunk(dst, src, displayPortBatchId, i);
+            crsfFrameDisplayPortChunk(dst, src, displayPortBatchId, batchIndex);
             crsfFinalize(dst);
             crsfRxSendTelemetryData();
-            i++;
+            batchIndex++;
+            batchLastTimeUs = currentTimeUs;
+
+            crsfLastCycleTime = currentTimeUs;
+#if defined(USE_CRSF_V3)
+            telemetryResponsePending = false;
+#endif
+
+            return;
         }
-        crsfLastCycleTime = currentTimeUs;
-        return;
     }
 #endif
+    if (!crsfRxIsTelemetryBufEmpty()) {
+        return; // do nothing if telemetry ouptut buffer is not empty yet.
+    }
 
     // Actual telemetry data only needs to be sent at a low frequency, ie 10Hz
     // Spread out scheduled frames evenly so each frame is sent at the same frequency.
-    if (currentTimeUs >= crsfLastCycleTime + (CRSF_CYCLETIME_US / crsfScheduleCount)) {
+    // speed up the telemetry rate to that configured if using accgyro data
+    if (processCrsf(currentTimeUs, crsfLastCycleTime)) {
         crsfLastCycleTime = currentTimeUs;
-        processCrsf();
+#ifdef USE_CRSF_ACCGYRO_TELEMETRY
+    } else if (crsfAccGyroEnabled() && crsfRxIsEventDrivenTelemetry()) {  // let the inbound request rate dictate the outbound rate
+        sbuf_t crsfPayloadBuf;
+        sbuf_t *dst = &crsfPayloadBuf;
+        crsfInitializeFrame(dst);
+        if (crsfFrameAccGyro(dst, currentTimeUs)) {
+            crsfFinalize(dst);
+        }
+#endif
     }
+#if defined(USE_CRSF_V3)
+    telemetryResponsePending = false;
+#endif
 }
 
 #if defined(UNIT_TEST) || defined(USE_RX_EXPRESSLRS)
@@ -827,9 +1496,27 @@ int getCrsfFrame(uint8_t *frame, crsfFrameType_e frameType)
     case CRSF_FRAMETYPE_FLIGHT_MODE:
         crsfFrameFlightMode(sbuf);
         break;
+#if defined(USE_BARO)
+    case CRSF_FRAMETYPE_BARO:
+        crsfFrameBaro(sbuf);
+        break;
+#endif
+#if defined(USE_MAG)
+    case CRSF_FRAMETYPE_MAG:
+        crsfFrameMag(sbuf);
+        break;
+#endif
 #if defined(USE_GPS)
     case CRSF_FRAMETYPE_GPS:
         crsfFrameGps(sbuf);
+        break;
+    case CRSF_FRAMETYPE_GPS_EXTENDED:
+        crsfFrameGpsExtended(sbuf);
+        break;
+#endif
+#if defined(USE_VARIO)
+    case CRSF_FRAMETYPE_VARIO_SENSOR:
+        crsfFrameVarioSensor(sbuf);
         break;
 #endif
 #if defined(USE_MSP_OVER_TELEMETRY)

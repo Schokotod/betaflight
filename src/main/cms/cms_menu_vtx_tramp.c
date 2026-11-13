@@ -41,6 +41,8 @@
 #include "io/vtx_tramp.h"
 #include "io/vtx.h"
 
+#include "cms_menu_vtx_tramp.h"
+
 char trampCmsStatusString[31] = "- -- ---- ----";
 //                               m bc ffff tppp
 //                               01234567890123
@@ -195,6 +197,7 @@ static const void *trampCmsCommence(displayPort_t *pDisp, const void *self)
     vtxSettingsConfigMutable()->freq = vtxCommonLookupFrequency(vtxCommonDevice(), trampCmsBand, trampCmsChan);
 
     saveConfigAndNotify();
+    cmsMenuExit(pDisp, self);
 
     return MENU_CHAIN_BACK;
 }
@@ -249,7 +252,7 @@ static const void *trampCmsOnEnter(displayPort_t *pDisp)
 
 static const OSD_Entry trampCmsMenuCommenceEntries[] = {
     { "CONFIRM", OME_Label,   NULL,          NULL },
-    { "YES",     OME_Funcall, trampCmsCommence, NULL },
+    { "YES",   OME_OSD_Exit, trampCmsCommence, (void *)CMS_EXIT },
     { "NO",    OME_Back, NULL, NULL },
     { NULL,      OME_END, NULL, NULL }
 };
@@ -276,7 +279,7 @@ static const OSD_Entry trampMenuEntries[] =
     { "(FREQ)", OME_UINT16 | DYNAMIC,  NULL,         &trampCmsEntFreqRef },
     { "POWER",  OME_TAB,     trampCmsConfigPower,    &trampCmsEntPower },
     { "T(C)",   OME_INT16 | DYNAMIC,   NULL,         &trampCmsEntTemp },
-    { "SAVE",   OME_Submenu, cmsMenuChange,          &trampCmsMenuCommence },
+    { "SAVE&EXIT", OME_Submenu, cmsMenuChange,          &trampCmsMenuCommence },
 
     { "BACK",   OME_Back, NULL, NULL },
     { NULL,     OME_END, NULL, NULL }

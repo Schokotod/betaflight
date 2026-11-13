@@ -22,19 +22,6 @@
 
 #include "drivers/serial.h"
 
-#if defined(STM32F7)
-#include "common/maths.h"
-
-#include "usbd_cdc.h"
-
-extern USBD_HandleTypeDef  USBD_Device;
-
-#elif defined(STM32H7) || defined(STM32G4)
-#include "usbd_cdc.h"
-
-extern USBD_HandleTypeDef  USBD_Device;
-#endif
-
 typedef struct {
     serialPort_t port;
 
@@ -45,7 +32,14 @@ typedef struct {
     bool buffering;
 } vcpPort_t;
 
+void usbVcpInit(void);
 serialPort_t *usbVcpOpen(void);
 struct serialPort_s;
 uint32_t usbVcpGetBaudRate(struct serialPort_s *instance);
+
+// Has the device been enumerated since boot. Latches: without VBUS sensing there is no
+// disconnect event, so this does not clear when the cable is pulled.
 uint8_t usbVcpIsConnected(void);
+
+// Is the host driving the link right now. Clears on unplug or host suspend.
+uint8_t usbVcpIsActive(void);

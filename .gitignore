@@ -24,7 +24,7 @@ README.pdf
 /tools/
 /build/
 # local changes only
-make/local.mk
+mk/local.mk
 
 # artefacts for VisualGDB (running in Visual Studio)
 mcu.mak
@@ -37,8 +37,14 @@ stm32.mak
 # ozone launch configurations
 /support/ozone
 
-# artefacts for Visual Studio Code
+# local scripts
+/support/scripts
+
+# artefacts for VS Code
 /.vscode/
+
+# artefacts for Visual Studio
+/.vs
 
 # artefacts for CLion
 /cmake-build-debug/
@@ -46,7 +52,15 @@ stm32.mak
 
 .vagrant
 ubuntu*.log
-/.vs
 
 # EEPROM image file (created by SITL)
 eeprom.bin
+
+# config used for building targets
+# changed to submodule
+#/src/config
+
+# Ignore personal AI agent files. AGENTS.md is shared and tracked.
+.claude
+CLAUDE.md
+/tasks

@@ -53,7 +53,6 @@
 
 #include "cms_menu_firmware.h"
 
-
 // Calibration
 
 #define CALIBRATION_STATUS_MAX_LENGTH 6
@@ -81,7 +80,7 @@ static const void *cmsx_CalibrationOnDisplayUpdate(displayPort_t *pDisp, const O
     tfp_sprintf(accCalibrationStatus, sensors(SENSOR_ACC) ? accIsCalibrationComplete() ? accHasBeenCalibrated() ? CALIBRATION_STATUS_OK : CALIBRATION_STATUS_NOK : CALIBRATION_STATUS_WAIT: CALIBRATION_STATUS_OFF);
 #endif
 #if defined(USE_BARO)
-    tfp_sprintf(baroCalibrationStatus, sensors(SENSOR_BARO) ? baroIsCalibrationComplete() ? CALIBRATION_STATUS_OK : CALIBRATION_STATUS_WAIT: CALIBRATION_STATUS_OFF);
+    tfp_sprintf(baroCalibrationStatus, sensors(SENSOR_BARO) ? baroIsCalibrated() ? CALIBRATION_STATUS_OK : CALIBRATION_STATUS_WAIT: CALIBRATION_STATUS_OFF);
 #endif
 
     return NULL;
@@ -196,8 +195,10 @@ static const void *cmsx_FirmwareInit(displayPort_t *pDisp)
 {
     UNUSED(pDisp);
 
-    strncpy(manufacturerId, getManufacturerId(), MAX_MANUFACTURER_ID_LENGTH + 1);
-    strncpy(boardName, getBoardName(), MAX_BOARD_NAME_LENGTH + 1);
+    strncpy(manufacturerId, getManufacturerId(), MAX_MANUFACTURER_ID_LENGTH);
+    manufacturerId[MAX_MANUFACTURER_ID_LENGTH] = 0;
+    strncpy(boardName, getBoardName(), MAX_BOARD_NAME_LENGTH);
+    boardName[MAX_BOARD_NAME_LENGTH] = 0;
 
     return NULL;
 }

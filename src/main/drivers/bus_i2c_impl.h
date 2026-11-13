@@ -23,43 +23,46 @@
 #include "platform.h"
 
 #include "drivers/io_types.h"
-#include "drivers/rcc_types.h"
+#include "drivers/bus_i2c.h"  // for i2cDevice_e
+#include "drivers/bus_i2c_types.h"
+
+#if PLATFORM_TRAIT_RCC
+#include "platform/rcc_types.h"
+#endif
 
 #define I2C_TIMEOUT_US          10000
 #define I2C_TIMEOUT_SYS_TICKS   (I2C_TIMEOUT_US / 1000)
 
-#define I2C_PIN_SEL_MAX 4
+#define I2C_PIN_SEL_MAX 8
 
 typedef struct i2cPinDef_s {
     ioTag_t ioTag;
-#if defined(STM32F4) || defined(STM32H7) || defined(STM32G4)
+#if I2C_TRAIT_AF_PIN
     uint8_t af;
 #endif
 } i2cPinDef_t;
 
-#if defined(STM32F4) || defined(STM32H7) || defined(STM32G4)
+#if I2C_TRAIT_AF_PIN
 #define I2CPINDEF(pin, af) { DEFIO_TAG_E(pin), af }
-#elif defined(STM32F1)
-#define I2CPINDEF(pin, af) { DEFIO_TAG_E(pin) }
 #else
 #define I2CPINDEF(pin) { DEFIO_TAG_E(pin) }
 #endif
 
 typedef struct i2cHardware_s {
-    I2CDevice device;
-    I2C_TypeDef *reg;
+    i2cDevice_e device;
+    i2cResource_t *reg;
     i2cPinDef_t sclPins[I2C_PIN_SEL_MAX];
     i2cPinDef_t sdaPins[I2C_PIN_SEL_MAX];
+#if PLATFORM_TRAIT_RCC
     rccPeriphTag_t rcc;
-#if !defined(STM32F303xC)
+#endif
     uint8_t ev_irq;
     uint8_t er_irq;
-#endif
 } i2cHardware_t;
 
 extern const i2cHardware_t i2cHardware[];
 
-#if defined(STM32F1) || defined(STM32F4)
+#if I2C_TRAIT_STATE
 typedef struct i2cState_s {
     volatile bool error;
     volatile bool busy;
@@ -70,15 +73,16 @@ typedef struct i2cState_s {
     volatile uint8_t reading;
     volatile uint8_t* write_p;
     volatile uint8_t* read_p;
+    volatile uint32_t transactionStartUs;
 } i2cState_t;
 #endif
 
 typedef struct i2cDevice_s {
     const i2cHardware_t *hardware;
-    I2C_TypeDef *reg;
+    i2cResource_t *reg;
     IO_t scl;
     IO_t sda;
-#if defined(STM32F4) || defined(STM32H7) || defined(STM32G4)
+#if I2C_TRAIT_AF_PIN
     uint8_t sclAF;
     uint8_t sdaAF;
 #endif
@@ -86,11 +90,11 @@ typedef struct i2cDevice_s {
     uint16_t clockSpeed;
 
     // MCU/Driver dependent member follows
-#if defined(STM32F1) || defined(STM32F4)
+#if I2C_TRAIT_STATE
     i2cState_t state;
 #endif
-#ifdef USE_HAL_DRIVER
-    I2C_HandleTypeDef handle;
+#if I2C_TRAIT_HANDLE
+    i2cHalHandle_t *halHandle;
 #endif
 } i2cDevice_t;
 

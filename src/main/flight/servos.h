@@ -22,7 +22,7 @@
 
 #include "pg/pg.h"
 #include "drivers/io_types.h"
-#include "drivers/pwm_output.h"
+#include "drivers/servo_impl.h"
 
 // These must be consecutive, see 'reversedSources'
 enum {
@@ -100,6 +100,8 @@ PG_DECLARE_ARRAY(servoMixer_t, MAX_SERVO_RULES, customServoMixers);
 
 #define MAX_SERVO_SPEED UINT8_MAX
 #define MAX_SERVO_BOXES 3
+#define SERVO_RATE_MAX 100
+#define SERVO_MIX_RANGE_MAX 100
 
 // Custom mixer configuration
 typedef struct mixerRules_s {

@@ -54,6 +54,7 @@ typedef struct pgRegistry_s {
         void *ptr;         // Pointer to init template
         pgResetFunc *fn;   // Popinter to pgResetFunc
     } reset;
+    uint32_t *fnv_hash;    // Used to detect if config has changed prior to write
 } pgRegistry_t;
 
 static inline uint16_t pgN(const pgRegistry_t* reg) {return reg->pgn & PGR_PGN_MASK;}
@@ -66,7 +67,7 @@ static inline uint16_t pgElementSize(const pgRegistry_t* reg) {return (reg->size
 #ifdef __APPLE__
 extern const pgRegistry_t __pg_registry_start[] __asm("section$start$__DATA$__pg_registry");
 extern const pgRegistry_t __pg_registry_end[] __asm("section$end$__DATA$__pg_registry");
-#define PG_REGISTER_ATTRIBUTES __attribute__ ((section("__DATA,__pg_registry"), used, aligned(4)))
+#define PG_REGISTER_ATTRIBUTES __attribute__ ((section("__DATA,__pg_registry"), used, aligned(8)))
 
 extern const uint8_t __pg_resetdata_start[] __asm("section$start$__DATA$__pg_resetdata");
 extern const uint8_t __pg_resetdata_end[] __asm("section$end$__DATA$__pg_resetdata");
@@ -118,6 +119,7 @@ extern const uint8_t __pg_resetdata_end[];
 #define PG_REGISTER_I(_type, _name, _pgn, _version, _reset)             \
     _type _name ## _System;                                             \
     _type _name ## _Copy;                                               \
+    uint32_t _name ## _fnv_hash;                                        \
     /* Force external linkage for g++. Catch multi registration */      \
     extern const pgRegistry_t _name ## _Registry;                       \
     const pgRegistry_t _name ##_Registry PG_REGISTER_ATTRIBUTES = {     \
@@ -128,6 +130,7 @@ extern const uint8_t __pg_resetdata_end[];
         .copy = (uint8_t*)&_name ## _Copy,                              \
         .ptr = 0,                                                       \
         _reset,                                                         \
+        .fnv_hash = &_name ## _fnv_hash,                                \
     }                                                                   \
     /**/
 
@@ -136,7 +139,7 @@ extern const uint8_t __pg_resetdata_end[];
     /**/
 
 #define PG_REGISTER_WITH_RESET_FN(_type, _name, _pgn, _version)         \
-    extern void pgResetFn_ ## _name(_type *);                           \
+    static void pgResetFn_ ## _name(_type *);                           \
     PG_REGISTER_I(_type, _name, _pgn, _version, .reset = {.fn = (pgResetFunc*)&pgResetFn_ ## _name }) \
     /**/
 
@@ -149,6 +152,7 @@ extern const uint8_t __pg_resetdata_end[];
 #define PG_REGISTER_ARRAY_I(_type, _length, _name, _pgn, _version, _reset)  \
     _type _name ## _SystemArray[_length];                               \
     _type _name ## _CopyArray[_length];                                 \
+    uint32_t _name ## _fnv_hash;                                        \
     extern const pgRegistry_t _name ##_Registry;                        \
     const pgRegistry_t _name ## _Registry PG_REGISTER_ATTRIBUTES = {    \
         .pgn = _pgn | (_version << 12),                                 \
@@ -158,6 +162,7 @@ extern const uint8_t __pg_resetdata_end[];
         .copy = (uint8_t*)&_name ## _CopyArray,                         \
         .ptr = 0,                                                       \
         _reset,                                                         \
+        .fnv_hash = &_name ## _fnv_hash,                                \
     }                                                                   \
     /**/
 

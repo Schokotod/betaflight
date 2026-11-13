@@ -45,6 +45,7 @@
 #include "drivers/compass/compass.h"
 #include "drivers/sensor.h"
 #include "drivers/time.h"
+#include "drivers/dshot.h"
 
 #include "config/config.h"
 #include "fc/controlrate_profile.h"
@@ -184,7 +185,7 @@ static frSkyTableInfo_t frSkyEscDataIdTableInfo = {frSkyEscDataIdTable, 0, 0};
 #define SMARTPORT_SERVICE_TIMEOUT_US 1000 // max allowed time to find a value to send
 
 static serialPort_t *smartPortSerialPort = NULL; // The 'SmartPort'(tm) Port.
-static const serialPortConfig_t *portConfig;
+static serialPortIdentifier_e telemetryPort = SERIAL_PORT_NONE;
 
 static portSharing_e smartPortPortSharing;
 
@@ -445,9 +446,9 @@ static void initSmartPortSensors(void)
 bool initSmartPortTelemetry(void)
 {
     if (telemetryState == TELEMETRY_STATE_UNINITIALIZED) {
-        portConfig = findSerialPortConfig(FUNCTION_TELEMETRY_SMARTPORT);
-        if (portConfig) {
-            smartPortPortSharing = determinePortSharing(portConfig, FUNCTION_TELEMETRY_SMARTPORT);
+        telemetryPort = telemetryProviderPort(TELEMETRY_PROTOCOL_SMARTPORT);
+        if (telemetryPort != SERIAL_PORT_NONE) {
+            smartPortPortSharing = determinePortSharing(telemetryPort, FUNCTION_TELEMETRY_SMARTPORT);
 
             smartPortWriteFrame = smartPortWriteFrameInternal;
 
@@ -485,10 +486,12 @@ static void freeSmartPortTelemetryPort(void)
 
 static void configureSmartPortTelemetryPort(void)
 {
-    if (portConfig) {
-        portOptions_e portOptions = (telemetryConfig()->halfDuplex ? SERIAL_BIDIR : SERIAL_UNIDIR) | (telemetryConfig()->telemetry_inverted ? SERIAL_NOT_INVERTED : SERIAL_INVERTED);
+    if (telemetryPort != SERIAL_PORT_NONE) {
+        // On SmartPort, SERIAL_INVERTED is default
+        const portOptions_e portOptions = (telemetryConfig()->halfDuplex ? SERIAL_BIDIR : 0)
+            | (telemetryConfig()->telemetry_inverted ? SERIAL_NOT_INVERTED : SERIAL_INVERTED);
 
-        smartPortSerialPort = openSerialPort(portConfig->identifier, FUNCTION_TELEMETRY_SMARTPORT, NULL, NULL, SMARTPORT_BAUD, SMARTPORT_UART_MODE, portOptions);
+        smartPortSerialPort = openSerialPort(telemetryPort, FUNCTION_TELEMETRY_SMARTPORT, NULL, NULL, SMARTPORT_BAUD, SMARTPORT_UART_MODE, portOptions);
     }
 }
 
@@ -506,7 +509,8 @@ void checkSmartPortTelemetryState(void)
 }
 
 #if defined(USE_MSP_OVER_TELEMETRY)
-static void smartPortSendMspResponse(uint8_t *data, const uint8_t dataSize) {
+static void smartPortSendMspResponse(uint8_t *data, const uint8_t dataSize)
+{
     smartPortPayload_t payload;
     payload.frameId = FSSP_MSPS_FRAME;
     memcpy(&payload.valueId, data, MIN(dataSize,SMARTPORT_MSP_PAYLOAD_SIZE));
@@ -656,7 +660,7 @@ void processSmartPortTelemetry(smartPortPayload_t *payload, volatile bool *clear
             case FSSP_DATAID_RPM        :
                 escData = getEscSensorData(ESC_SENSOR_COMBINED);
                 if (escData != NULL) {
-                    smartPortSendPackage(id, calcEscRpm(escData->rpm));
+                    smartPortSendPackage(id, lrintf(erpmToRpm(escData->rpm)));
                     *clearToSend = false;
                 }
                 break;
@@ -670,7 +674,7 @@ void processSmartPortTelemetry(smartPortPayload_t *payload, volatile bool *clear
             case FSSP_DATAID_RPM8       :
                 escData = getEscSensorData(id - FSSP_DATAID_RPM1);
                 if (escData != NULL) {
-                    smartPortSendPackage(id, calcEscRpm(escData->rpm));
+                    smartPortSendPackage(id, lrintf(erpmToRpm(escData->rpm)));
                     *clearToSend = false;
                 }
                 break;
@@ -703,7 +707,7 @@ void processSmartPortTelemetry(smartPortPayload_t *payload, volatile bool *clear
             case FSSP_DATAID_FUEL       :
                 {
                     uint32_t data;
-                    if (batteryConfig()->batteryCapacity > 0) {
+                    if (currentBatteryProfile->batteryCapacity > 0) {
                         data = calculateBatteryPercentageRemaining();
                     } else {
                         data = getMAhDrawn();
@@ -736,15 +740,15 @@ void processSmartPortTelemetry(smartPortPayload_t *payload, volatile bool *clear
                 *clearToSend = false;
                 break;
             case FSSP_DATAID_ACCX       :
-                smartPortSendPackage(id, lrintf(100 * acc.accADC[X] * acc.dev.acc_1G_rec)); // Multiply by 100 to show as x.xx g on Taranis
+                smartPortSendPackage(id, lrintf(100 * acc.accADC.x * acc.dev.acc_1G_rec)); // Multiply by 100 to show as x.xx g on Taranis
                 *clearToSend = false;
                 break;
             case FSSP_DATAID_ACCY       :
-                smartPortSendPackage(id, lrintf(100 * acc.accADC[Y] * acc.dev.acc_1G_rec));
+                smartPortSendPackage(id, lrintf(100 * acc.accADC.y * acc.dev.acc_1G_rec));
                 *clearToSend = false;
                 break;
             case FSSP_DATAID_ACCZ       :
-                smartPortSendPackage(id, lrintf(100 * acc.accADC[Z] * acc.dev.acc_1G_rec));
+                smartPortSendPackage(id, lrintf(100 * acc.accADC.z * acc.dev.acc_1G_rec));
                 *clearToSend = false;
                 break;
 #endif
@@ -769,7 +773,7 @@ void processSmartPortTelemetry(smartPortPayload_t *payload, volatile bool *clear
                     tmpi += 4;
                 }
 
-                if (FLIGHT_MODE(ANGLE_MODE)) {
+                if (FLIGHT_MODE(ANGLE_MODE | ALT_HOLD_MODE | POS_HOLD_MODE)) {
                     tmpi += 10;
                 }
                 if (FLIGHT_MODE(HORIZON_MODE)) {
@@ -793,9 +797,11 @@ void processSmartPortTelemetry(smartPortPayload_t *payload, volatile bool *clear
             case FSSP_DATAID_T2         :
 #ifdef USE_GPS
                 if (sensors(SENSOR_GPS)) {
-                    // satellite accuracy HDOP: 0 = worst [HDOP > 5.5m], 9 = best [HDOP <= 1.0m]
-                    uint16_t hdop = constrain(scaleRange(gpsSol.hdop, 100, 550, 9, 0), 0, 9) * 100;
-                    smartPortSendPackage(id, (STATE(GPS_FIX) ? 1000 : 0) + (STATE(GPS_FIX_HOME) ? 2000 : 0) + hdop + gpsSol.numSat);
+                    // satellite accuracy PDOP: 0 = worst [PDOP > 5.5m], 9 = best [PDOP <= 1.0m]
+                    // the above comment isn't entirely right. DOP is accuracy relative to specified accuracy of the module, not a value in meters
+                    // eg a value of 1.0 means 1.0 times specified accuracy (typically 2m)
+                    uint16_t pdop = constrain(scaleRange(gpsSol.dop.pdop, 100, 550, 9, 0), 0, 9) * 100;
+                    smartPortSendPackage(id, (STATE(GPS_FIX) ? 1000 : 0) + (STATE(GPS_FIX_HOME) ? 2000 : 0) + pdop + gpsSol.numSat);
                     *clearToSend = false;
                 } else if (featureIsEnabled(FEATURE_GPS)) {
                     smartPortSendPackage(id, 0);
@@ -908,12 +914,13 @@ void handleSmartPortTelemetry(void)
     if (telemetryState == TELEMETRY_STATE_INITIALIZED_SERIAL && smartPortSerialPort) {
         smartPortPayload_t *payload = NULL;
         bool clearToSend = false;
-        while (serialRxBytesWaiting(smartPortSerialPort) > 0 && !payload) {
+        uint32_t rxBytesWaiting = serialRxBytesWaiting(smartPortSerialPort);
+        while (rxBytesWaiting-- > 0 && !payload) {
             uint8_t c = serialRead(smartPortSerialPort);
             payload = smartPortDataReceive(c, &clearToSend, serialReadyToSend, true);
         }
 
-            processSmartPortTelemetry(payload, &clearToSend, &requestTimeout);
+        processSmartPortTelemetry(payload, &clearToSend, &requestTimeout);
     }
 }
 #endif

@@ -20,8 +20,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
-
 #include <math.h>
 
 #include "platform.h"
@@ -40,6 +40,7 @@
 #include "config/config.h"
 #include "fc/core.h"
 #include "fc/rc.h"
+#include "fc/tasks.h"
 #include "fc/runtime_config.h"
 
 #include "flight/pid.h"
@@ -48,6 +49,7 @@
 #include "io/beeper.h"
 #include "io/usb_cdc_hid.h"
 #include "io/dashboard.h"
+#include "io/gimbal_control.h"
 #include "io/gps.h"
 #include "io/vtx_control.h"
 
@@ -69,24 +71,24 @@
 
 // true if arming is done via the sticks (as opposed to a switch)
 static bool isUsingSticksToArm = true;
+static bool disarmUserRequested = false; // has the user requested a disarm, using either sticks or switches, whether armed or disarmed
 
-float rcCommand[4];           // interval [1000;2000] for THROTTLE and [-500;+500] for ROLL/PITCH/YAW
+float rcCommand[4];           // interval [0;1] for THROTTLE and [-1;1] for ROLL/PITCH/YAW
 
-PG_REGISTER_WITH_RESET_TEMPLATE(rcControlsConfig_t, rcControlsConfig, PG_RC_CONTROLS_CONFIG, 0);
+PG_REGISTER_WITH_RESET_TEMPLATE(rcControlsConfig_t, rcControlsConfig, PG_RC_CONTROLS_CONFIG, 1);
 
 PG_RESET_TEMPLATE(rcControlsConfig_t, rcControlsConfig,
     .deadband = 0,
     .yaw_deadband = 0,
-    .alt_hold_deadband = 40,
-    .alt_hold_fast_change = 1,
     .yaw_control_reversed = false,
 );
 
-PG_REGISTER_WITH_RESET_TEMPLATE(armingConfig_t, armingConfig, PG_ARMING_CONFIG, 1);
+PG_REGISTER_WITH_RESET_TEMPLATE(armingConfig_t, armingConfig, PG_ARMING_CONFIG, 2);
 
 PG_RESET_TEMPLATE(armingConfig_t, armingConfig,
-    .gyro_cal_on_first_arm = 0,  // TODO - Cleanup retarded arm support
-    .auto_disarm_delay = 5
+    .gyro_cal_on_first_arm = 0,
+    .auto_disarm_delay = 5,
+    .prearm_allow_rearm = 0,
 );
 
 PG_REGISTER_WITH_RESET_TEMPLATE(flight3DConfig_t, flight3DConfig, PG_MOTOR_3D_CONFIG, 0);
@@ -105,22 +107,31 @@ bool isUsingSticksForArming(void)
     return isUsingSticksToArm;
 }
 
-bool areSticksInApModePosition(uint16_t ap_mode)
+bool wasLastDisarmUserRequested(void)
 {
-    return fabsf(rcCommand[ROLL]) < ap_mode && fabsf(rcCommand[PITCH]) < ap_mode;
+    return disarmUserRequested;
 }
+
+void clearWasLastDisarmUserRequested(void)
+{
+    disarmUserRequested = false;
+}
+
 
 throttleStatus_e calculateThrottleStatus(void)
 {
+    const float throttle = rcGetChannel(THROTTLE);
+    const float mincheck = rcUsToNorm(rxConfig()->mincheck);
+
     if (featureIsEnabled(FEATURE_3D)) {
         if (IS_RC_MODE_ACTIVE(BOX3D) || flight3DConfig()->switched_mode3d) {
-            if (rcData[THROTTLE] < rxConfig()->mincheck) {
+            if (throttle < mincheck) {
                 return THROTTLE_LOW;
             }
-        } else if ((rcData[THROTTLE] > (rxConfig()->midrc - flight3DConfig()->deadband3d_throttle) && rcData[THROTTLE] < (rxConfig()->midrc + flight3DConfig()->deadband3d_throttle))) {
+        } else if (fabsf(throttle - rcUsToNorm(rxConfig()->midrc)) < rcUsSpanToNorm(flight3DConfig()->deadband3d_throttle)) {
             return THROTTLE_LOW;
         }
-    } else if (rcData[THROTTLE] < rxConfig()->mincheck) {
+    } else if (throttle < mincheck) {
         return THROTTLE_LOW;
     }
 
@@ -135,7 +146,7 @@ throttleStatus_e calculateThrottleStatus(void)
     doNotRepeat = false; \
 }
 
-void processRcStickPositions()
+void processRcStickPositions(void)
 {
     // time the sticks are maintained
     static int16_t rcDelayMs;
@@ -147,13 +158,15 @@ void processRcStickPositions()
     static bool pendingApplyRollAndPitchTrimDeltaSave = false;
 
     // checking sticks positions
+    const float mincheck = rcUsToNorm(rxConfig()->mincheck);
+    const float maxcheck = rcUsToNorm(rxConfig()->maxcheck);
     uint8_t stTmp = 0;
     for (int i = 0; i < 4; i++) {
         stTmp >>= 2;
-        if (rcData[i] > rxConfig()->mincheck) {
+        if (rcGetChannel(i) > mincheck) {
             stTmp |= 0x80;  // check for MIN
         }
-        if (rcData[i] < rxConfig()->maxcheck) {
+        if (rcGetChannel(i) < maxcheck) {
             stTmp |= 0x40;  // check for MAX
         }
     }
@@ -176,10 +189,18 @@ void processRcStickPositions()
         } else {
             resetTryingToArm();
             // Disarming via ARM BOX
+              disarmUserRequested = true;
             resetArmingDisabled();
-            if (ARMING_FLAG(ARMED) && rxIsReceivingSignal() && !failsafeIsActive()  ) {
+            const bool boxFailsafeSwitchIsOn = IS_RC_MODE_ACTIVE(BOXFAILSAFE);
+            if (ARMING_FLAG(ARMED) && (failsafeIsReceivingRxData() || boxFailsafeSwitchIsOn)) {
+                // in a true signal loss situation, allow disarm only once we regain validated RxData (failsafeIsReceivingRxData = true),
+                // to avoid potentially false disarm signals soon after link recover
+                // Note that BOXFAILSAFE will also drive failsafeIsReceivingRxData false (immediately at start or end)
+                // That's why we explicitly allow disarm here if BOXFAILSAFE switch is active
+                // Note that BOXGPSRESCUE mode does not trigger failsafe - we can always disarm in that mode
                 rcDisarmTicks++;
                 if (rcDisarmTicks > 3) {
+                    // require three duplicate disarm values in a row before we disarm
                     disarm(DISARM_REASON_SWITCH);
                 }
             }
@@ -188,10 +209,11 @@ void processRcStickPositions()
         if (rcDelayMs >= ARM_DELAY_MS && !doNotRepeat) {
             doNotRepeat = true;
             // Disarm on throttle down + yaw
+             disarmUserRequested = true;
             resetTryingToArm();
-            if (ARMING_FLAG(ARMED))
+            if (ARMING_FLAG(ARMED)){
                 disarm(DISARM_REASON_STICKS);
-            else {
+           } else {
                 beeper(BEEPER_DISARM_REPEAT);     // sound tone while stick held
                 repeatAfter(STICK_AUTOREPEAT_MS); // disarm tone will repeat
 
@@ -301,8 +323,7 @@ void processRcStickPositions()
     }
 #endif
 
-
-    if (FLIGHT_MODE(ANGLE_MODE|HORIZON_MODE)) {
+    if (FLIGHT_MODE(ANGLE_MODE | HORIZON_MODE)) {
         // in ANGLE or HORIZON mode, so use sticks to apply accelerometer trims
         rollAndPitchTrims_t accelerometerTrimsDelta;
         memset(&accelerometerTrimsDelta, 0, sizeof(accelerometerTrimsDelta));
@@ -316,19 +337,19 @@ void processRcStickPositions()
         bool shouldApplyRollAndPitchTrimDelta = false;
         switch (rcSticks) {
         case THR_HI + YAW_CE + PIT_HI + ROL_CE:
-            accelerometerTrimsDelta.values.pitch = 2;
+            accelerometerTrimsDelta.values.pitch = 1;
             shouldApplyRollAndPitchTrimDelta = true;
             break;
         case THR_HI + YAW_CE + PIT_LO + ROL_CE:
-            accelerometerTrimsDelta.values.pitch = -2;
+            accelerometerTrimsDelta.values.pitch = -1;
             shouldApplyRollAndPitchTrimDelta = true;
             break;
         case THR_HI + YAW_CE + PIT_CE + ROL_HI:
-            accelerometerTrimsDelta.values.roll = 2;
+            accelerometerTrimsDelta.values.roll = 1;
             shouldApplyRollAndPitchTrimDelta = true;
             break;
         case THR_HI + YAW_CE + PIT_CE + ROL_LO:
-            accelerometerTrimsDelta.values.roll = -2;
+            accelerometerTrimsDelta.values.roll = -1;
             shouldApplyRollAndPitchTrimDelta = true;
             break;
         }
@@ -409,12 +430,12 @@ void processRcStickPositions()
 #endif
 }
 
-int32_t getRcStickDeflection(int32_t axis, uint16_t midrc) {
-    return MIN(ABS(rcData[axis] - midrc), 500);
-}
-
 void rcControlsInit(void)
 {
     analyzeModeActivationConditions();
     isUsingSticksToArm = !isModeActivationConditionPresent(BOXARM) && systemConfig()->enableStickArming;
+    // Mode ranges change live over MSP, so any task gated on a mode being assigned has to
+    // be re-evaluated here rather than only at boot. Safe before tasksInit(), which starts
+    // by clearing the scheduler queue and re-enabling everything.
+    tasksUpdateModeGatedEnables();
 }

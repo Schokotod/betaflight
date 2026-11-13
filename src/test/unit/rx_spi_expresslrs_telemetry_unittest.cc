@@ -29,6 +29,7 @@ extern "C" {
     #include "platform.h"
 
     #include "build/version.h"
+    #include "common/crc.h"
     #include "common/printf.h"
 
     #include "drivers/io.h"
@@ -44,11 +45,15 @@ extern "C" {
     #include "telemetry/msp_shared.h"
     #include "rx/crsf_protocol.h"
     #include "rx/expresslrs_telemetry.h"
+    #include "fc/rc_modes.h"
+    #include "flight/gps_rescue.h"
     #include "flight/imu.h"
 
     #include "sensors/battery.h"
     #include "sensors/sensors.h"
     #include "sensors/acceleration.h"
+    #include "sensors/barometer.h"
+    #include "sensors/compass.h"
 
     #include "config/config.h"
 
@@ -70,6 +75,7 @@ extern "C" {
 
     PG_REGISTER(telemetryConfig_t, telemetryConfig, PG_TELEMETRY_CONFIG, 0);
     PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 0);
+    PG_REGISTER(gpsRescueConfig_t, gpsRescueConfig, PG_GPS_RESCUE, 0);
 }
 
 #include "unittest_macros.h"
@@ -84,30 +90,29 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestInit)
 
 static void testSetDataToTransmit(uint8_t payloadSize, uint8_t *payload)
 {
-    uint8_t *data;
-    uint8_t maxLength;
-    uint8_t packageIndex;
+    uint8_t data[ELRS_TELEMETRY_BYTES_PER_CALL] = {0};
+    uint8_t maxPackageIndex = (payloadSize - 1) / ELRS_TELEMETRY_BYTES_PER_CALL;
+    uint8_t nextPackageIndex;
     bool confirmValue = true;
 
-    setTelemetryDataToTransmit(payloadSize, payload, ELRS_TELEMETRY_BYTES_PER_CALL);
+    setTelemetryDataToTransmit(payloadSize, payload);
 
-    for (int j = 0; j < (1 + ((payloadSize - 1) / ELRS_TELEMETRY_BYTES_PER_CALL)); j++) {
-        getCurrentTelemetryPayload(&packageIndex, &maxLength, &data);
-        EXPECT_LE(maxLength, 5);
-        EXPECT_EQ(1 + j, packageIndex);
-        for(int i = 0; i < maxLength; i++) {
+    for (int j = 0; j <= maxPackageIndex; j++) {
+        nextPackageIndex = getCurrentTelemetryPayload(data, ELRS_TELEMETRY_BYTES_PER_CALL);
+        if (j != maxPackageIndex) {
+            EXPECT_EQ(1 + j, nextPackageIndex);
+        } else {
+            EXPECT_EQ(0, nextPackageIndex); //back to start
+        }
+        uint8_t maxLength = (j == maxPackageIndex) ? payloadSize % ELRS_TELEMETRY_BYTES_PER_CALL : ELRS_TELEMETRY_BYTES_PER_CALL;
+        for (int i = 0; i < maxLength; i++) {
             EXPECT_EQ(payload[i + j * ELRS_TELEMETRY_BYTES_PER_CALL], data[i]);
         }
+        EXPECT_EQ(true, isTelemetrySenderActive());
         confirmCurrentTelemetryPayload(confirmValue);
         confirmValue = !confirmValue;
     }
 
-    getCurrentTelemetryPayload(&packageIndex, &maxLength, &data);
-    EXPECT_EQ(0, packageIndex);
-    EXPECT_EQ(true, isTelemetrySenderActive());
-    confirmCurrentTelemetryPayload(!confirmValue);
-    EXPECT_EQ(true, isTelemetrySenderActive());
-    confirmCurrentTelemetryPayload(confirmValue);
     EXPECT_EQ(false, isTelemetrySenderActive());
 }
 
@@ -210,10 +215,10 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestFlightMode)
     getNextTelemetryPayload(&payloadSize, &payload);
     EXPECT_EQ(currentPayloadIndex, 0);
 
-    EXPECT_EQ('W', payload[3]);
-    EXPECT_EQ('A', payload[4]);
-    EXPECT_EQ('I', payload[5]);
-    EXPECT_EQ('T', payload[6]);
+    EXPECT_EQ('A', payload[3]);
+    EXPECT_EQ('C', payload[4]);
+    EXPECT_EQ('R', payload[5]);
+    EXPECT_EQ('O', payload[6]);
     EXPECT_EQ('*', payload[7]);
     EXPECT_EQ(0, payload[8]);
 
@@ -221,9 +226,13 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestFlightMode)
 }
 
 TEST(RxSpiExpressLrsTelemetryUnitTest, TestMspVersionRequest)
-{ 
-    uint8_t request[15] = {238,12,122,200,234,48,0,1,1,0,0,0,0,128, 0};
-    uint8_t response[12] = {200,10,123,234,200,48,3,1,0,1,44,42};
+{
+    uint8_t request[15] = {238, 12, 122, 200, 234, 48, 0, 1, 1, 0, 0, 0, 0, 128, 0};
+    uint8_t response[12] = {200, 10, 123, 234, 200, 48, 3, 1, 0, API_VERSION_MAJOR, API_VERSION_MINOR, 0};
+    // Last byte is the CRSF CRC-8 (poly 0xD5) over the frame bytes from the type byte
+    // through the last data byte (response[2..10]); compute it at runtime so this test
+    // does not need to be touched when API_VERSION_MAJOR or API_VERSION_MINOR change.
+    response[11] = crc8_dvb_s2_update(0, &response[2], 9);
     uint8_t data1[6] = {1, request[0], request[1], request[2], request[3], request[4]};
     uint8_t data2[6] = {2, request[5], request[6], request[7], request[8], request[9]};
     uint8_t data3[6] = {3, request[10], request[11], request[12], request[13], request[14]};
@@ -240,7 +249,7 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestMspVersionRequest)
     initTelemetry();
     initSharedMsp();
 
-    setMspDataToReceive(15, mspBuffer, ELRS_MSP_BYTES_PER_CALL);
+    setMspDataToReceive(15, mspBuffer);
     receiveMspData(data1[0], data1 + 1);
     receiveMspData(data2[0], data2 + 1);
     receiveMspData(data3[0], data3 + 1);
@@ -279,7 +288,7 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestMspPidRequest)
     initTelemetry();
     initSharedMsp();
 
-    setMspDataToReceive(sizeof(mspBuffer), mspBuffer, ELRS_MSP_BYTES_PER_CALL);
+    setMspDataToReceive(sizeof(mspBuffer), mspBuffer);
     receiveMspData(data1[0], data1 + 1);
     EXPECT_FALSE(hasFinishedMspData());
     receiveMspData(data2[0], data2 + 1);
@@ -328,7 +337,7 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestMspVtxRequest)
     initTelemetry();
     initSharedMsp();
 
-    setMspDataToReceive(sizeof(mspBuffer), mspBuffer, ELRS_MSP_BYTES_PER_CALL);
+    setMspDataToReceive(sizeof(mspBuffer), mspBuffer);
     receiveMspData(data1[0], data1 + 1);
     receiveMspData(data2[0], data2 + 1);
     receiveMspData(data3[0], data3 + 1);
@@ -364,10 +373,10 @@ TEST(RxSpiExpressLrsTelemetryUnitTest, TestDeviceInfoResp)
     initTelemetry();
     initSharedMsp();
 
-    setMspDataToReceive(sizeof(mspBuffer), mspBuffer, ELRS_MSP_BYTES_PER_CALL);
+    setMspDataToReceive(sizeof(mspBuffer), mspBuffer);
     receiveMspData(pingData[0], pingData + 1);
     EXPECT_FALSE(hasFinishedMspData());
-    receiveMspData(0, 0);
+    receiveMspData(0, pingData + 1);
     EXPECT_TRUE(hasFinishedMspData());
 
     EXPECT_FALSE(deviceInfoReplyPending);
@@ -397,6 +406,8 @@ extern "C" {
     uint8_t armingFlags;
     uint8_t stateFlags;
     uint16_t flightModeFlags;
+    baro_t baro;
+    mag_t mag;
 
     uint32_t microsISR(void) {return 0; }
 
@@ -418,16 +429,17 @@ extern "C" {
     bool telemetryIsSensorEnabled(sensor_e) {return true; }
     bool sensors(uint32_t ) { return true; }
 
-    bool airmodeIsEnabled(void) {return airMode; }
+    bool isAirmodeEnabled(void) {return airMode; }
 
     bool isBatteryVoltageConfigured(void) { return true; }
     bool isAmperageConfigured(void) { return true; }
 
-    const serialPortConfig_t *findSerialPortConfig(serialPortFunction_e) { return NULL;}
     serialPort_t *openSerialPort(serialPortIdentifier_e, serialPortFunction_e, serialReceiveCallbackPtr, void *, uint32_t, portMode_e, portOptions_e) { return NULL; }
     void serialWriteBuf(serialPort_t *, const uint8_t *, int) {}
 
     int32_t getEstimatedAltitudeCm(void) { return gpsSol.llh.altCm; }
+
+    int16_t getEstimatedVario(void) { return 0; }
 
     int32_t getMAhDrawn(void) { return testmAhDrawn; }
 
@@ -463,4 +475,9 @@ extern "C" {
 
     timeUs_t rxFrameTimeUs(void) { return 0; }
 
+    bool IS_RC_MODE_ACTIVE(boxId_e) { return false; }
+
+    int getArmingDisableFlags(void) { return 0; }
+
+    bool gpsRescueIsConfigured(void) { return false; }
 }

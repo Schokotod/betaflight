@@ -81,6 +81,9 @@ const OSD_Entry menuOsdActiveElemsEntries[] =
 #ifdef USE_RX_RSSI_DBM
     {"RSSI DBM",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_RSSI_DBM_VALUE]},
 #endif
+#ifdef USE_RX_RSNR
+    {"RSNR",               OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_RSNR_VALUE]},
+#endif
     {"BATTERY VOLTAGE",    OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_MAIN_BATT_VOLTAGE]},
     {"BATTERY USAGE",      OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_MAIN_BATT_USAGE]},
     {"AVG CELL VOLTAGE",   OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_AVG_CELL_VOLTAGE]},
@@ -105,7 +108,7 @@ const OSD_Entry menuOsdActiveElemsEntries[] =
 #endif
     {"ANTI GRAVITY",       OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_ANTI_GRAVITY]},
     {"FLY MODE",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_FLYMODE]},
-    {"NAME",               OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_CRAFT_NAME]},
+    {"CRAFT NAME",         OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_CRAFT_NAME]},
     {"THROTTLE",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_THROTTLE_POS]},
 #ifdef USE_VTX_CONTROL
     {"VTX CHAN",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_VTX_CHANNEL]},
@@ -120,6 +123,16 @@ const OSD_Entry menuOsdActiveElemsEntries[] =
     {"HOME DIR",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_HOME_DIR]},
     {"HOME DIST",          OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_HOME_DIST]},
     {"FLIGHT DIST",        OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_FLIGHT_DIST]},
+#if ENABLE_FLIGHT_PLAN
+    {"WP NUMBER",          OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_NUMBER]},
+    {"WP LAT",             OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_CURRENT_LAT]},
+    {"WP LON",             OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_CURRENT_LON]},
+    {"WP ALT",             OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_CURRENT_ALT]},
+    {"WP DIST",            OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_DISTANCE]},
+    {"WP DIR",             OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_DIRECTION]},
+    {"WP NEXT",            OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_NEXT_NUMBER]},
+    {"WP ETA",             OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WP_ETA]},
+#endif
 #endif // GPS
     {"COMPASS BAR",        OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_COMPASS_BAR]},
 #ifdef USE_ESC_SENSOR
@@ -140,11 +153,15 @@ const OSD_Entry menuOsdActiveElemsEntries[] =
     {"OSD PROFILE NAME",   OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_PROFILE_NAME]},
 #endif
     {"DEBUG",              OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_DEBUG]},
+    {"DEBUG2",             OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_DEBUG2]},
     {"WARNINGS",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_WARNINGS]},
     {"DISARMED",           OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_DISARMED]},
     {"PIT ANG",            OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_PITCH_ANGLE]},
     {"ROL ANG",            OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_ROLL_ANGLE]},
     {"HEADING",            OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_NUMERICAL_HEADING]},
+#ifdef USE_POSITION_HOLD
+    {"POS HOLD READY",     OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_POS_HOLD_READY]},
+#endif
 #ifdef USE_VARIO
     {"VARIO",              OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_NUMERICAL_VARIO]},
 #endif
@@ -161,10 +178,22 @@ const OSD_Entry menuOsdActiveElemsEntries[] =
     {"STICK OVERLAY LEFT", OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_STICK_OVERLAY_LEFT]},
     {"STICK OVERLAY RIGHT",OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_STICK_OVERLAY_RIGHT]},
 #endif
-    {"DISPLAY NAME",       OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_DISPLAY_NAME]},
+#ifdef USE_GPS_LAP_TIMER
+    {"LAP TIME CURRENT",   OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_GPS_LAP_TIME_CURRENT]},
+    {"LAP TIME PREVIOUS",  OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_GPS_LAP_TIME_PREVIOUS]},
+    {"LAP TIME BEST 3",    OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_GPS_LAP_TIME_BEST3]},
+#endif // USE_GPS_LAP_TIMER
+    {"PILOT NAME",         OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_PILOT_NAME]},
     {"RC CHANNELS",        OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_RC_CHANNELS]},
     {"CAMERA FRAME",       OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_CAMERA_FRAME]},
     {"TOTAL FLIGHTS",      OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_TOTAL_FLIGHTS]},
+    {"AUX VALUE",          OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_AUX_VALUE]},
+#ifdef USE_RANGEFINDER
+    {"LIDAR DIST",         OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_LIDAR_DIST]},
+#endif
+#if ENABLE_OSD_CUSTOM_TEXT
+    {"SERIAL TEXT",        OME_VISIBLE | DYNAMIC, NULL, &osdConfig_item_pos[OSD_CUSTOM_SERIAL_TEXT]},
+#endif
     {"BACK",               OME_Back,    NULL, NULL},
     {NULL,                 OME_END,     NULL, NULL}
 };
@@ -183,6 +212,7 @@ static CMS_Menu menuOsdActiveElems = {
 static uint8_t osdConfig_rssi_alarm;
 static uint16_t osdConfig_link_quality_alarm;
 static int16_t osdConfig_rssi_dbm_alarm;
+static int16_t osdConfig_rsnr_alarm;
 static uint16_t osdConfig_cap_alarm;
 static uint16_t osdConfig_alt_alarm;
 static uint16_t osdConfig_distance_alarm;
@@ -196,6 +226,7 @@ static const void *menuAlarmsOnEnter(displayPort_t *pDisp)
     osdConfig_rssi_alarm = osdConfig()->rssi_alarm;
     osdConfig_link_quality_alarm = osdConfig()->link_quality_alarm;
     osdConfig_rssi_dbm_alarm = osdConfig()->rssi_dbm_alarm;
+    osdConfig_rsnr_alarm = osdConfig()->rsnr_alarm;
     osdConfig_cap_alarm = osdConfig()->cap_alarm;
     osdConfig_alt_alarm = osdConfig()->alt_alarm;
     osdConfig_distance_alarm = osdConfig()->distance_alarm;
@@ -213,6 +244,7 @@ static const void *menuAlarmsOnExit(displayPort_t *pDisp, const OSD_Entry *self)
     osdConfigMutable()->rssi_alarm = osdConfig_rssi_alarm;
     osdConfigMutable()->link_quality_alarm = osdConfig_link_quality_alarm;
     osdConfigMutable()->rssi_dbm_alarm = osdConfig_rssi_dbm_alarm;
+    osdConfigMutable()->rsnr_alarm = osdConfig_rsnr_alarm;
     osdConfigMutable()->cap_alarm = osdConfig_cap_alarm;
     osdConfigMutable()->alt_alarm = osdConfig_alt_alarm;
     osdConfigMutable()->distance_alarm = osdConfig_distance_alarm;
@@ -228,6 +260,7 @@ const OSD_Entry menuAlarmsEntries[] =
     {"RSSI",     OME_UINT8,  NULL, &(OSD_UINT8_t){&osdConfig_rssi_alarm, 5, 90, 5}},
     {"LINK QUALITY", OME_UINT16,  NULL, &(OSD_UINT16_t){&osdConfig_link_quality_alarm, 5, 300, 5}},
     {"RSSI DBM", OME_INT16,  NULL, &(OSD_INT16_t){&osdConfig_rssi_dbm_alarm, CRSF_RSSI_MIN, CRSF_SNR_MAX, 5}},
+    {"RSNR", OME_INT16,  NULL, &(OSD_INT16_t){&osdConfig_rsnr_alarm, CRSF_SNR_MIN, CRSF_SNR_MAX, 5}},
     {"MAIN BAT", OME_UINT16, NULL, &(OSD_UINT16_t){&osdConfig_cap_alarm, 50, 30000, 50}},
     {"MAX ALT",  OME_UINT16, NULL, &(OSD_UINT16_t){&osdConfig_alt_alarm, 1, 200, 1}},
     {"MAX DISTANCE", OME_UINT16, NULL, &(OSD_UINT16_t){&osdConfig_distance_alarm, 0, UINT16_MAX, 10}},
@@ -248,8 +281,8 @@ static CMS_Menu menuAlarms = {
     .entries = menuAlarmsEntries,
 };
 
-osd_timer_source_e timerSource[OSD_TIMER_COUNT];
-osd_timer_precision_e timerPrecision[OSD_TIMER_COUNT];
+uint8_t timerSource[OSD_TIMER_COUNT];
+uint8_t timerPrecision[OSD_TIMER_COUNT];
 uint8_t timerAlarm[OSD_TIMER_COUNT];
 
 static const void *menuTimersOnEnter(displayPort_t *pDisp)
@@ -278,7 +311,8 @@ static const void *menuTimersOnExit(displayPort_t *pDisp, const OSD_Entry *self)
     return NULL;
 }
 
-static const char * osdTimerPrecisionNames[] = {"SCND", "HDTH"};
+static const char * osdTimerPrecisionNames[] = {"SCND", "HDTH", "TNTH"};
+STATIC_ASSERT(ARRAYLEN(osdTimerPrecisionNames) == OSD_TIMER_PREC_COUNT, osdTimerPrecisionNames_size_mismatch);
 
 const OSD_Entry menuTimersEntries[] =
 {
@@ -315,7 +349,7 @@ static uint8_t displayPortProfileMax7456_whiteBrightness;
 static uint8_t osdConfig_osdProfileIndex;
 #endif
 
-static displayPortBackground_e osdMenuBackgroundType;
+static uint8_t osdMenuBackgroundType;
 
 static const void *cmsx_menuOsdOnEnter(displayPort_t *pDisp)
 {

@@ -29,7 +29,7 @@
 
 #include "sensors/esc_sensor.h"
 
-#define OSD_NUM_TIMER_TYPES 4
+#define OSD_NUM_TIMER_TYPES 5
 extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 
 #define OSD_ELEMENT_BUFFER_LENGTH 32
@@ -44,22 +44,32 @@ extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 
 #define OSD_RCCHANNELS_COUNT 4
 
+#if OSD_FB_ENABLE_SMALLFONT
 #define OSD_CAMERA_FRAME_MIN_WIDTH  2
-#define OSD_CAMERA_FRAME_MAX_WIDTH  30    // Characters per row supportes by MAX7456
+#define OSD_CAMERA_FRAME_MAX_WIDTH  46    // Characters per row supported by PICO FB OSD
+#define OSD_CAMERA_FRAME_MIN_HEIGHT 2
+#define OSD_CAMERA_FRAME_MAX_HEIGHT 24    // Rows supported by PICO FB OSD (PAL)
+#else
+#define OSD_CAMERA_FRAME_MIN_WIDTH  2
+#define OSD_CAMERA_FRAME_MAX_WIDTH  30    // Characters per row supported by MAX7456
 #define OSD_CAMERA_FRAME_MIN_HEIGHT 2
 #define OSD_CAMERA_FRAME_MAX_HEIGHT 16    // Rows supported by MAX7456 (PAL)
+#endif
 
 #define OSD_FRAMERATE_MIN_HZ 1
+#ifndef OSD_FRAMERATE_MAX_HZ
 #define OSD_FRAMERATE_MAX_HZ 60
+#endif
+#ifndef OSD_FRAMERATE_DEFAULT_HZ
 #define OSD_FRAMERATE_DEFAULT_HZ 12
+#endif
 
 #define OSD_PROFILE_BITS_POS 11
 #define OSD_PROFILE_MASK    (((1 << OSD_PROFILE_COUNT) - 1) << OSD_PROFILE_BITS_POS)
-#define OSD_POS_MAX   0x3FF
+#define OSD_POS_MAX   0x7FF
 #define OSD_POSCFG_MAX UINT16_MAX  // element positions now use all 16 bits
 #define OSD_PROFILE_FLAG(x)  (1 << ((x) - 1 + OSD_PROFILE_BITS_POS))
 #define OSD_PROFILE_1_FLAG  OSD_PROFILE_FLAG(1)
-
 
 #ifdef USE_OSD_PROFILES
 #define VISIBLE(x) osdElementVisible(x)
@@ -69,15 +79,36 @@ extern const char * const osdTimerSourceNames[OSD_NUM_TIMER_TYPES];
 #define VISIBLE_IN_OSD_PROFILE(item, profile) VISIBLE(item)
 #endif
 
-
 // Character coordinate
-#define OSD_POSITION_BITS 5 // 5 bits gives a range 0-31
-#define OSD_POSITION_XY_MASK ((1 << OSD_POSITION_BITS) - 1)
-#define OSD_TYPE_MASK 0xC000   // bits 14-15
-#define OSD_POS(x,y)  ((x & OSD_POSITION_XY_MASK) | ((y & OSD_POSITION_XY_MASK) << OSD_POSITION_BITS))
-#define OSD_X(x)      (x & OSD_POSITION_XY_MASK)
-#define OSD_Y(x)      ((x >> OSD_POSITION_BITS) & OSD_POSITION_XY_MASK)
-#define OSD_TYPE(x)   ((x & OSD_TYPE_MASK) >> 14)
+#define OSD_POSITION_BITS       5       // 5 bits gives a range 0-31
+#define OSD_POSITION_BIT_XHD    10      // extra bit used to extend X range in a backward compatible manner for HD displays
+#define OSD_POSITION_XHD_MASK   (1 << OSD_POSITION_BIT_XHD)
+#define OSD_POSITION_XY_MASK    ((1 << OSD_POSITION_BITS) - 1)
+#define OSD_TYPE_MASK           0xC000  // bits 14-15
+#define OSD_POS(x, y)  (((x) & OSD_POSITION_XY_MASK)                    \
+                        | (((x) << (OSD_POSITION_BIT_XHD - OSD_POSITION_BITS)) & OSD_POSITION_XHD_MASK) \
+                        | (((y) & OSD_POSITION_XY_MASK) << OSD_POSITION_BITS)) \
+    /**/
+#define OSD_X(x)      (((x) & OSD_POSITION_XY_MASK) | (((x) & OSD_POSITION_XHD_MASK) >> (OSD_POSITION_BIT_XHD - OSD_POSITION_BITS)))
+#define OSD_Y(x)      (((x) >> OSD_POSITION_BITS) & OSD_POSITION_XY_MASK)
+#define OSD_TYPE(x)   (((x) & OSD_TYPE_MASK) >> 14)
+
+#define OSD_SD_COLS VIDEO_COLUMNS_SD
+#define OSD_SD_ROWS VIDEO_LINES_PAL
+
+// Default HD OSD canvas size to be applied unless the goggles announce otherwise
+#define OSD_HD_COLS 53
+#define OSD_HD_ROWS 20
+
+#define OSD_CANVAS_COLS_MAX 63
+#define OSD_CANVAS_ROWS_MAX 31
+
+#define OSD_RSSI_ALARM_MAX 100
+#define OSD_LINK_QUALITY_ALARM_MAX 100
+#define OSD_CAP_ALARM_MAX 20000
+#define OSD_ALT_ALARM_MAX 10000
+#define OSD_STICK_OVERLAY_RADIO_MODE_MIN 1
+#define OSD_STICK_OVERLAY_RADIO_MODE_MAX 4
 
 // Timer configuration
 // Stored as 15[alarm:8][precision:4][source:4]0
@@ -149,7 +180,7 @@ typedef enum {
     OSD_FLIGHT_DIST,
     OSD_STICK_OVERLAY_LEFT,
     OSD_STICK_OVERLAY_RIGHT,
-    OSD_DISPLAY_NAME,
+    OSD_PILOT_NAME,
     OSD_ESC_RPM_FREQ,
     OSD_RATE_PROFILE_NAME,
     OSD_PID_PROFILE_NAME,
@@ -161,8 +192,65 @@ typedef enum {
     OSD_TOTAL_FLIGHTS,
     OSD_UP_DOWN_REFERENCE,
     OSD_TX_UPLINK_POWER,
+    OSD_WATT_HOURS_DRAWN,
+    OSD_AUX_VALUE,
+    OSD_READY_MODE,
+    OSD_RSNR_VALUE,
+    OSD_SYS_GOGGLE_VOLTAGE,
+    OSD_SYS_VTX_VOLTAGE,
+    OSD_SYS_BITRATE,
+    OSD_SYS_DELAY,
+    OSD_SYS_DISTANCE,
+    OSD_SYS_LQ,
+    OSD_SYS_GOGGLE_DVR,
+    OSD_SYS_VTX_DVR,
+    OSD_SYS_WARNINGS,
+    OSD_SYS_VTX_TEMP,
+    OSD_SYS_FAN_SPEED,
+    OSD_GPS_LAP_TIME_CURRENT,
+    OSD_GPS_LAP_TIME_PREVIOUS,
+    OSD_GPS_LAP_TIME_BEST3,
+    OSD_DEBUG2,
+    OSD_CUSTOM_MSG0,
+    OSD_CUSTOM_MSG1,
+    OSD_CUSTOM_MSG2,
+    OSD_CUSTOM_MSG3,
+    OSD_LIDAR_DIST,
+    OSD_CUSTOM_SERIAL_TEXT,
+    OSD_BATTERY_PROFILE_NAME,
+
+#if defined(USE_GPS) && ENABLE_FLIGHT_PLAN
+    // Waypoint elements
+    OSD_WP_NUMBER,              // "WP 3/12" - current/total
+    OSD_WP_CURRENT_LAT,         // Current waypoint latitude
+    OSD_WP_CURRENT_LON,         // Current waypoint longitude
+    OSD_WP_CURRENT_ALT,         // Current waypoint altitude
+    OSD_WP_DISTANCE,            // Distance to current waypoint
+    OSD_WP_DIRECTION,           // Direction arrow to current waypoint
+    OSD_WP_NEXT_NUMBER,         // "NEXT 4" - next waypoint number
+    OSD_WP_ETA,                 // Estimated time to waypoint
+#endif
+
+#ifdef USE_OSD_NAV_MAP
+    OSD_NAV_MAP,                // minimap of home, flight plan and flown trail
+#endif
+
+#ifdef USE_POSITION_HOLD
+    OSD_POS_HOLD_READY,         // pre-engagement Position Hold readiness indicator
+#endif
+
+#ifdef USE_PITOT
+    OSD_AIRSPEED,
+#endif
+
     OSD_ITEM_COUNT // MUST BE LAST
 } osd_items_e;
+
+// Number of elements that existed as of MSP API 1.46 (Betaflight 4.5). MSP-query type OSD
+// consumers - the DJI V1 air unit / Caddx Vista render the OSD themselves from MSP_OSD_CONFIG -
+// stop accepting the reply once it grows beyond what 4.5 produced, so they are served a reply
+// truncated to this many elements. Never change this value; it describes a released wire format.
+#define OSD_ITEM_COUNT_API_1_46 80
 
 // *** IMPORTANT ***
 // Whenever new elements are added to 'osd_items_e', make sure to increment
@@ -200,6 +288,13 @@ typedef enum {
     OSD_STAT_TOTAL_TIME,
     OSD_STAT_TOTAL_DIST,
     OSD_STAT_MIN_RSSI_DBM,
+    OSD_STAT_WATT_HOURS_DRAWN,
+    OSD_STAT_MIN_RSNR,
+    OSD_STAT_BEST_3_CONSEC_LAPS,
+    OSD_STAT_BEST_LAP,
+    OSD_STAT_FULL_THROTTLE_TIME,
+    OSD_STAT_FULL_THROTTLE_COUNTER,
+    OSD_STAT_AVG_THROTTLE,
     OSD_STAT_COUNT // MUST BE LAST
 } osd_stats_e;
 
@@ -217,6 +312,7 @@ typedef enum {
     OSD_TIMER_SRC_TOTAL_ARMED,
     OSD_TIMER_SRC_LAST_ARMED,
     OSD_TIMER_SRC_ON_OR_ARMED,
+    OSD_TIMER_SRC_LAUNCH_TIME,
     OSD_TIMER_SRC_COUNT
 } osd_timer_source_e;
 
@@ -233,18 +329,21 @@ typedef enum {
     OSD_WARNING_BATTERY_WARNING,
     OSD_WARNING_BATTERY_CRITICAL,
     OSD_WARNING_VISUAL_BEEPER,
-    OSD_WARNING_CRASH_FLIP,
+    OSD_WARNING_CRASHFLIP,
     OSD_WARNING_ESC_FAIL,
     OSD_WARNING_CORE_TEMPERATURE,
-    OSD_WARNING_RC_SMOOTHING,
     OSD_WARNING_FAIL_SAFE,
     OSD_WARNING_LAUNCH_CONTROL,
     OSD_WARNING_GPS_RESCUE_UNAVAILABLE,
-    OSD_WARNING_GPS_RESCUE_DISABLED,
+    OSD_WARNING_GPS_RESCUE_FAILING,
     OSD_WARNING_RSSI,
     OSD_WARNING_LINK_QUALITY,
     OSD_WARNING_RSSI_DBM,
     OSD_WARNING_OVER_CAP,
+    OSD_WARNING_RSNR,
+    OSD_WARNING_LOAD,
+    OSD_WARNING_POSHOLD_FAILED,
+    OSD_WARNING_AUTOPILOT_ABORT,
     OSD_WARNING_COUNT // MUST BE LAST
 } osdWarningsFlags_e;
 
@@ -254,23 +353,24 @@ typedef enum {
     OSD_DISPLAYPORT_DEVICE_MAX7456,
     OSD_DISPLAYPORT_DEVICE_MSP,
     OSD_DISPLAYPORT_DEVICE_FRSKYOSD,
+    OSD_DISPLAYPORT_DEVICE_FBOSD,
 } osdDisplayPortDevice_e;
 
 // Make sure the number of warnings do not exceed the available 32bit storage
 STATIC_ASSERT(OSD_WARNING_COUNT <= 32, osdwarnings_overflow);
 
-#define ESC_RPM_ALARM_OFF -1
-#define ESC_TEMP_ALARM_OFF INT8_MIN
-#define ESC_CURRENT_ALARM_OFF -1
+#define ESC_RPM_ALARM_OFF         -1
+#define ESC_TEMP_ALARM_OFF         0
+#define ESC_CURRENT_ALARM_OFF     -1
 
-#define OSD_GPS_RESCUE_DISABLED_WARNING_DURATION_US 3000000 // 3 seconds
+#define OSD_GPS_RESCUE_DISABLED_WARNING_DURATION_US 5000000 // 5 seconds
 
 extern const uint16_t osdTimerDefault[OSD_TIMER_COUNT];
 extern const osd_stats_e osdStatsDisplayOrder[OSD_STAT_COUNT];
 
 typedef struct osdConfig_s {
     // Alarms
-    uint16_t cap_alarm;
+    uint16_t cap_alarm;                     // Legacy fallback when the active battery profile has no capacity set
     uint16_t alt_alarm;
     uint8_t rssi_alarm;
 
@@ -282,7 +382,7 @@ typedef struct osdConfig_s {
     uint8_t ahMaxPitch;
     uint8_t ahMaxRoll;
     uint32_t enabled_stats;
-    int8_t esc_temp_alarm;
+    uint8_t esc_temp_alarm;
     int16_t esc_rpm_alarm;
     int16_t esc_current_alarm;
     uint8_t core_temp_alarm;
@@ -292,7 +392,8 @@ typedef struct osdConfig_s {
     char profile[OSD_PROFILE_COUNT][OSD_PROFILE_NAME_LENGTH + 1];
     uint16_t link_quality_alarm;
     int16_t rssi_dbm_alarm;
-    uint8_t gps_sats_show_hdop;
+    int16_t rsnr_alarm;
+    uint8_t gps_sats_show_pdop;
     int8_t rcChannels[OSD_RCCHANNELS_COUNT];  // RC channel values to display, -1 if none
     uint8_t displayPortDevice;                // osdDisplayPortDevice_e
     uint16_t distance_alarm;
@@ -303,6 +404,24 @@ typedef struct osdConfig_s {
     uint16_t framerate_hz;
     uint8_t cms_background_type;              // For supporting devices, determines whether the CMS background is transparent or opaque
     uint8_t stat_show_cell_value;
+#ifdef USE_CRAFTNAME_MSGS
+    uint8_t osd_craftname_msgs;               // Insert LQ/RSSI-dBm and warnings into CraftName
+#endif //USE_CRAFTNAME_MSGS
+    uint8_t aux_channel;
+    uint16_t aux_scale;
+    uint8_t aux_symbol;
+    uint8_t canvas_cols;                      // Canvas dimensions for HD display
+    uint8_t canvas_rows;
+#ifdef USE_OSD_QUICK_MENU
+    uint8_t osd_use_quick_menu;               // use QUICK menu YES/NO
+#endif // USE_OSD_QUICK_MENU
+#ifdef USE_SPEC_PREARM_SCREEN
+    uint8_t osd_show_spec_prearm;
+#endif // USE_SPEC_PREARM_SCREEN
+    displayPortSeverity_e arming_logo;        // font from which to display logo on arming
+    int8_t osd_uart;                          // serialPortIdentifier_e; SERIAL_PORT_NONE = unassigned. Bit chosen by displayPortDevice (FRSKYOSD=FUNCTION_FRSKY_OSD, else none).
+    int8_t osd_custom_text_uart;              // serialPortIdentifier_e; SERIAL_PORT_NONE = unassigned.  Always maps to FUNCTION_OSD_CUSTOM_TEXT when set.
+    uint8_t osd_custom_text_baud;             // baudRate_e index for osd_custom_text_uart
 } osdConfig_t;
 
 PG_DECLARE(osdConfig_t, osdConfig);
@@ -318,29 +437,35 @@ typedef struct statistic_s {
     int16_t max_speed;
     int16_t min_voltage; // /100
     uint16_t end_voltage;
-    int16_t max_current; // /10
+    int16_t max_current; // /100
     uint8_t min_rssi;
     int32_t max_altitude;
     int16_t max_distance;
     float max_g_force;
+    int16_t max_esc_temp_ix;
     int16_t max_esc_temp;
     int32_t max_esc_rpm;
     uint16_t min_link_quality;
     int16_t min_rssi_dbm;
+    int16_t min_rsnr;
 } statistic_t;
 
 extern timeUs_t resumeRefreshAt;
 extern timeUs_t osdFlyTime;
+extern timeUs_t osdLaunchTime;
+
 #if defined(USE_ACC)
 extern float osdGForce;
 #endif
 #ifdef USE_ESC_SENSOR
 extern escSensorData_t *osdEscDataCombined;
 #endif
+extern uint16_t osdAuxValue;
 
 void osdInit(displayPort_t *osdDisplayPort, osdDisplayPortDevice_e displayPortDevice);
 bool osdUpdateCheck(timeUs_t currentTimeUs, timeDelta_t currentDeltaTimeUs);
 void osdUpdate(timeUs_t currentTimeUs);
+uint16_t osdGetCapacityAlarm(void);
 
 void osdStatSetState(uint8_t statIndex, bool enabled);
 bool osdStatGetState(uint8_t statIndex);
@@ -354,6 +479,8 @@ void osdWarnSetState(uint8_t warningIndex, bool enabled);
 bool osdWarnGetState(uint8_t warningIndex);
 bool osdElementVisible(uint16_t value);
 bool osdGetVisualBeeperState(void);
+void osdSetVisualBeeperState(bool state);
 statistic_t *osdGetStats(void);
 bool osdNeedsAccelerometer(void);
 int osdPrintFloat(char *buffer, char leadingSymbol, float value, char *formatString, unsigned decimalPlaces, bool round, char trailingSymbol);
+bool osdIsBlink(osd_items_e item);

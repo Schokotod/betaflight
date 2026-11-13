@@ -27,7 +27,6 @@
 #include "drivers/bus_i2c_busdev.h"
 #include "drivers/bus_spi.h"
 
-
 // Access routines where the register is accessed directly
 bool busRawWriteRegister(const extDevice_t *dev, uint8_t reg, uint8_t data)
 {
@@ -76,7 +75,6 @@ bool busRawReadRegisterBufferStart(const extDevice_t *dev, uint8_t reg, uint8_t 
         return busReadRegisterBufferStart(dev, reg, data, length);
     }
 }
-
 
 // Write routines where the register is masked with 0x7f
 bool busWriteRegister(const extDevice_t *dev, uint8_t reg, uint8_t data)
@@ -171,6 +169,9 @@ bool busBusy(const extDevice_t *dev, bool *error)
 #if !defined(USE_I2C)
     UNUSED(error);
 #endif
+    if (!dev->bus) {
+        return false;
+    }
     switch (dev->bus->busType) {
 #ifdef USE_SPI
     case BUS_TYPE_SPI:

@@ -30,15 +30,50 @@
 
 #include "piniobox.h"
 
+#ifndef PINIO1_BOX
+#define PINIO1_BOX PERMANENT_ID_NONE
+#endif
 
-PG_REGISTER_WITH_RESET_TEMPLATE(pinioBoxConfig_t, pinioBoxConfig, PG_PINIOBOX_CONFIG, 1);
+#ifndef PINIO2_BOX
+#define PINIO2_BOX PERMANENT_ID_NONE
+#endif
 
-PG_RESET_TEMPLATE(pinioBoxConfig_t, pinioBoxConfig,
-    .permanentId = {
-        PERMANENT_ID_NONE,
-        PERMANENT_ID_NONE,
-        PERMANENT_ID_NONE,
-        PERMANENT_ID_NONE
-    },
-);
+#ifndef PINIO3_BOX
+#define PINIO3_BOX PERMANENT_ID_NONE
+#endif
+
+#ifndef PINIO4_BOX
+#define PINIO4_BOX PERMANENT_ID_NONE
+#endif
+
+#ifndef PINIO5_BOX
+#define PINIO5_BOX PERMANENT_ID_NONE
+#endif
+
+#ifndef PINIO6_BOX
+#define PINIO6_BOX PERMANENT_ID_NONE
+#endif
+
+#ifndef PINIO7_BOX
+#define PINIO7_BOX PERMANENT_ID_NONE
+#endif
+
+#ifndef PINIO8_BOX
+#define PINIO8_BOX PERMANENT_ID_NONE
+#endif
+
+PG_REGISTER_WITH_RESET_FN(pinioBoxConfig_t, pinioBoxConfig, PG_PINIOBOX_CONFIG, 1);
+
+void pgResetFn_pinioBoxConfig(pinioBoxConfig_t *config)
+{
+    config->permanentId[0] = PINIO1_BOX;
+    config->permanentId[1] = PINIO2_BOX;
+    config->permanentId[2] = PINIO3_BOX;
+    config->permanentId[3] = PINIO4_BOX;
+   // rest is reset to NONE
+   for (unsigned i = 4; i < PINIO_COUNT; i++) {
+       config->permanentId[i] = PERMANENT_ID_NONE;
+   }
+}
+
 #endif

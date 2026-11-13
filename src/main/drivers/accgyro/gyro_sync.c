@@ -34,7 +34,6 @@
 #include "drivers/accgyro/accgyro.h"
 #include "drivers/accgyro/gyro_sync.h"
 
-
 bool gyroSyncCheckUpdate(gyroDev_t *gyro)
 {
     bool ret;
@@ -72,6 +71,11 @@ uint16_t gyroSetSampleRate(gyroDev_t *gyro)
             }
             accSampleRateHz = 800;
             break;
+        case BMI_423_SPI:
+            gyro->gyroRateKHz = GYRO_RATE_6400_Hz;
+            gyroSampleRateHz = 6400;
+            accSampleRateHz = 800;
+            break;
         case ICM_20649_SPI:
             gyro->gyroRateKHz = GYRO_RATE_9_kHz;
             gyroSampleRateHz = 9000;
@@ -84,6 +88,13 @@ uint16_t gyroSetSampleRate(gyroDev_t *gyro)
             accSampleRateHz = 833;
             break;
 #endif
+        case ICM_45686_SPI:
+        case ICM_45605_SPI:
+        case ICM_56686_SPI:
+            gyro->gyroRateKHz = GYRO_RATE_6400_Hz;
+            gyroSampleRateHz = 6400;
+            accSampleRateHz = 1600;
+            break;
         default:
             gyro->gyroRateKHz = GYRO_RATE_8_kHz;
             gyroSampleRateHz = 8000;

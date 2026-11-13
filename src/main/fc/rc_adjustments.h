@@ -52,16 +52,15 @@ typedef enum {
     ADJUSTMENT_PITCH_ROLL_F,
     ADJUSTMENT_FEEDFORWARD_TRANSITION,
     ADJUSTMENT_HORIZON_STRENGTH,
-    ADJUSTMENT_ROLL_RC_RATE,
-    ADJUSTMENT_PITCH_RC_RATE,
-    ADJUSTMENT_ROLL_RC_EXPO,
-    ADJUSTMENT_PITCH_RC_EXPO,
     ADJUSTMENT_PID_AUDIO,
     ADJUSTMENT_PITCH_F,
     ADJUSTMENT_ROLL_F,
     ADJUSTMENT_YAW_F,
     ADJUSTMENT_OSD_PROFILE,
     ADJUSTMENT_LED_PROFILE,
+    ADJUSTMENT_LED_DIMMER,
+    ADJUSTMENT_SIMPLIFIED_MASTER_MULTIPLIER,
+    ADJUSTMENT_BATTERY_PROFILE,
     ADJUSTMENT_FUNCTION_COUNT
 } adjustmentFunction_e;
 
@@ -106,7 +105,7 @@ typedef struct timedAdjustmentState_s {
 
 typedef struct continuosAdjustmentState_s {
     uint8_t adjustmentRangeIndex;
-    int16_t lastRcData;
+    float lastRcData;
 } continuosAdjustmentState_t;
 
 struct controlRateConfig_s;

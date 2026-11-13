@@ -191,17 +191,17 @@
 static uint32_t rawP = 0;
 static uint16_t rawT = 0;
 
-bool lpsWriteCommand(const extDevice_t *dev, uint8_t cmd, uint8_t byte)
+static bool lpsWriteCommand(const extDevice_t *dev, uint8_t cmd, uint8_t byte)
 {
     return spiWriteRegRB(dev, cmd, byte);
 }
 
-bool lpsReadCommand(const extDevice_t *dev, uint8_t cmd, uint8_t *data, uint8_t len)
+static bool lpsReadCommand(const extDevice_t *dev, uint8_t cmd, uint8_t *data, uint8_t len)
 {
     return spiReadRegMskBufRB(dev, cmd | 0x80 | 0x40, data, len);
 }
 
-bool lpsWriteVerify(const extDevice_t *dev, uint8_t cmd, uint8_t byte)
+static bool lpsWriteVerify(const extDevice_t *dev, uint8_t cmd, uint8_t byte)
 {
     uint8_t temp = 0xff;
     spiWriteReg(dev, cmd, byte);
@@ -219,12 +219,6 @@ static void lpsOn(const extDevice_t *dev, uint8_t CTRL1_val)
 static void lpsOff(const extDevice_t *dev)
 {
     lpsWriteCommand(dev, LPS_CTRL1, 0x00 | (0x01 << 2));
-}
-
-static void lpsNothing(baroDev_t *baro)
-{
-    UNUSED(baro);
-    return;
 }
 
 static bool lpsNothingBool(baroDev_t *baro)
@@ -291,10 +285,10 @@ bool lpsDetect(baroDev_t *baro)
     baro->combined_read = true;
     baro->ut_delay = 1;
     baro->up_delay = 1000000 / 24;
-    baro->start_ut = lpsNothing;
+    baro->start_ut = lpsNothingBool;
     baro->get_ut = lpsNothingBool;
     baro->read_ut = lpsNothingBool;
-    baro->start_up = lpsNothing;
+    baro->start_up = lpsNothingBool;
     baro->get_up = lpsRead;
     baro->read_up = lpsNothingBool;
     baro->calculate = lpsCalculate;

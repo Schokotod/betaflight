@@ -18,24 +18,23 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
-// expresslrs packet header types
-// 00 -> standard 4 channel data packet
-// 01 -> switch data packet
-// 11 -> tlm packet
-// 10 -> sync packet with hop data
 typedef enum {
     ELRS_RC_DATA_PACKET = 0x00,
     ELRS_MSP_DATA_PACKET = 0x01,
     ELRS_SYNC_PACKET = 0x02,
+#ifndef USE_ELRSV4
     ELRS_TLM_PACKET = 0x03,
+#else
+    ELRS_TLM_PACKET = 0x00,
+#endif
 } elrsPacketType_e;
 
 typedef enum {
     ELRS_DIO_UNKNOWN = 0,
-    ELRS_DIO_RX_DONE = 1,
-    ELRS_DIO_TX_DONE = 2,
-    ELRS_DIO_RX_AND_TX_DONE = 3,
-} dioReason_e;
+    ELRS_DIO_RX_DONE = (1 << 0),
+    ELRS_DIO_TX_DONE = (1 << 1),
+    ELRS_DIO_HWERROR = (1 << 2),
+} dioReasonFlags_e;
 
 typedef enum {
     ELRS_CONNECTED,
@@ -68,6 +67,9 @@ typedef struct elrsReceiver_s {
     int8_t rssi;
     int8_t snr;
     int8_t rssiFiltered;
+#ifdef USE_RX_RSNR
+    int8_t rsnrFiltered;
+#endif //USE_RX_RSNR
 
     uint8_t uplinkLQ;
 
@@ -84,6 +86,7 @@ typedef struct elrsReceiver_s {
     uint32_t rfModeCycledAtMs;
     uint8_t rateIndex;
     uint8_t nextRateIndex;
+    uint8_t switchMode;
 
     uint32_t gotConnectionMs;
     uint32_t lastSyncPacketMs;
@@ -95,7 +98,6 @@ typedef struct elrsReceiver_s {
     bool inBindingMode;
     volatile bool initializeReceiverPending;
     volatile bool fhssRequired;
-    volatile bool didFhss;
 
     uint32_t statsUpdatedAtMs;
 

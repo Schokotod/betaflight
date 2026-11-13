@@ -15,14 +15,12 @@
 # Things that the user might override on the commandline
 #
 
-# The target to build, see VALID_TARGETS below
-TARGET    ?= STM32F405
+# The target or config to build
+TARGET    ?=
+CONFIG    ?=
 
 # Compile-time options
 OPTIONS   ?=
-
-# compile for OpenPilot BootLoader support
-OPBL      ?= no
 
 # compile for External Storage Bootloader support
 EXST      ?= no
@@ -35,7 +33,7 @@ CUSTOM_DEFAULTS_EXTENDED ?= no
 
 # Debugger optons:
 #   empty - ordinary build with all optimizations enabled
-#   INFO - ordinary build with debug symbols and all optimizations enabled
+#   INFO - ordinary build with debug symbols and all optimizations enabled. Only builds touched files.
 #   GDB - debug build with minimum number of optimizations
 DEBUG     ?=
 
@@ -49,8 +47,8 @@ SERIAL_DEVICE   ?= $(firstword $(wildcard /dev/ttyACM*) $(firstword $(wildcard /
 # Flash size (KB).  Some low-end chips actually have more flash than advertised, use this to override.
 FLASH_SIZE ?=
 
-# Release file naming (no revision to be present if this is 'yes')
-RELEASE ?= no
+# Disabled build flags
+CFLAGS_DISABLED         ?=
 
 ###############################################################################
 # Things that need to be maintained as the source changes
@@ -59,82 +57,167 @@ RELEASE ?= no
 FORKNAME      = betaflight
 
 # Working directories
+# ROOT_DIR is the full path to the directory containing this Makefile
+ROOT_DIR        := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+# ROOT is the relative path to the directory containing this Makefile
 ROOT            := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
+
+PLATFORM_DIR	:= $(ROOT)/src/platform
 SRC_DIR         := $(ROOT)/src/main
+LIB_MAIN_DIR    := $(ROOT)/lib/main
+LIB_MODULES_DIR := $(ROOT)/lib/modules
 OBJECT_DIR      := $(ROOT)/obj/main
 BIN_DIR         := $(ROOT)/obj
 CMSIS_DIR       := $(ROOT)/lib/main/CMSIS
-INCLUDE_DIRS    := $(SRC_DIR) \
-                   $(ROOT)/src/main/target \
-                   $(ROOT)/src/main/startup
-LINKER_DIR      := $(ROOT)/src/link
+INCLUDE_DIRS    := $(SRC_DIR)
+
+# Auto-hydrate submodules from .gitmodules that are not marked
+# `update = none`. Currently that's `src/config` (board configs) and
+# `lib/modules/dronecan/libcanard` (DroneCAN transport). Heavy vendor
+# SDKs (pico-sdk, esp-idf, STM32H5/N6/C5, APM32F4) keep `update = none`
+# and stay opt-in through their platform-SDK hydration targets.
+AUTOHYDRATE_SUBMODULES := $(shell \
+    git config --file .gitmodules -l 2>/dev/null | \
+    awk -F '=' '/^submodule\..*\.path=/ { \
+                    name=$$1; sub(/^submodule\./,"",name); sub(/\.path$$/,"",name); \
+                    paths[name]=$$2 \
+                } \
+                /^submodule\..*\.update=/ { \
+                    name=$$1; sub(/^submodule\./,"",name); sub(/\.update$$/,"",name); \
+                    updates[name]=$$2 \
+                } \
+                END { for (n in paths) if (updates[n] != "none") print paths[n] }' )
+AUTOHYDRATE_STAMPS := $(addsuffix /.git,$(AUTOHYDRATE_SUBMODULES))
+
+# MCU .mk files opt in to the DroneCAN source fan-out with
+#   LIB_SUBMODULES += $(DRONECAN_LIB_DIR)
+# The hydration above is independent — it keeps the submodule present on
+# every target; the LIB_SUBMODULES check in mk/dronecan.mk is what decides
+# whether to actually compile the sources.
+LIB_SUBMODULES  :=
+DRONECAN_LIB_DIR := lib/modules/dronecan/libcanard
+
+MAKE_SCRIPT_DIR := $(ROOT)/mk
 
 ## V                 : Set verbosity level based on the V= parameter
 ##                     V=0 Low
 ##                     V=1 High
-include $(ROOT)/make/build_verbosity.mk
+include $(MAKE_SCRIPT_DIR)/build_verbosity.mk
 
 # Build tools, so we all share the same versions
 # import macros common to all supported build systems
-include $(ROOT)/make/system-id.mk
+include $(MAKE_SCRIPT_DIR)/system-id.mk
 
 # developer preferences, edit these at will, they'll be gitignored
--include $(ROOT)/make/local.mk
+ifneq ($(wildcard $(MAKE_SCRIPT_DIR)/local.mk),)
+include $(MAKE_SCRIPT_DIR)/local.mk
+endif
+
+# some targets use parallel build by default
+# MAKEFLAGS is valid only inside target, do not use this at parse phase
+DEFAULT_PARALLEL_JOBS := $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+# MinGW's make requires a numeric argument for -j; detect CPU count via nproc
+ifeq ($(MINGW),1)
+  DEFAULT_PARALLEL_JOBS := $(shell nproc 2>/dev/null || echo 4)
+endif
+MAKE_PARALLEL 		     = $(if $(filter -j%, $(MAKEFLAGS)),$(EMPTY),-j$(DEFAULT_PARALLEL_JOBS))
 
 # pre-build sanity checks
-include $(ROOT)/make/checks.mk
+include $(MAKE_SCRIPT_DIR)/checks.mk
+
+# basic target list
+PLATFORMS        := $(sort $(notdir $(patsubst /%,%, $(wildcard $(PLATFORM_DIR)/*))))
+BASE_TARGETS     := $(sort $(notdir $(patsubst %/,%,$(dir $(wildcard $(PLATFORM_DIR)/*/target/*/target.mk)))))
 
 # configure some directories that are relative to wherever ROOT_DIR is located
-TOOLS_DIR ?= $(ROOT)/tools
-DL_DIR    := $(ROOT)/downloads
+TOOLS_DIR  ?= $(ROOT_DIR)/tools
+DL_DIR     := $(ROOT)/downloads
+CONFIG_DIR ?= $(BETAFLIGHT_CONFIG)
+ifeq ($(CONFIG_DIR),)
+CONFIG_DIR := $(ROOT)/src/config
+endif
+DIRECTORIES := $(DL_DIR) $(TOOLS_DIR)
 
 export RM := rm
 
 # import macros that are OS specific
-include $(ROOT)/make/$(OSFAMILY).mk
+include $(MAKE_SCRIPT_DIR)/$(OSFAMILY).mk
 
 # include the tools makefile
-include $(ROOT)/make/tools.mk
+include $(MAKE_SCRIPT_DIR)/tools.mk
 
-# default xtal value for F4 targets
-HSE_VALUE       ?= 8000000
+# -----------------------------------------------------------------------------
+# Tool discovery (need CROSS_CC available before config handling)
+# -----------------------------------------------------------------------------
 
-# used for turning on features like VCP and SDCARD
-FEATURES        =
+# Find out if ccache is installed on the system
+CCACHE := ccache
+RESULT = $(shell (which $(CCACHE) > /dev/null 2>&1; echo $$?) )
+ifneq ($(RESULT),0)
+CCACHE :=
+endif
 
-# used to disable features based on flash space shortage (larger number => more features disabled)
-FEATURE_CUT_LEVEL_SUPPLIED := $(FEATURE_CUT_LEVEL)
-FEATURE_CUT_LEVEL =
+# Tool names (defer prefix resolution for per-platform overrides like SITL)
+CROSS_CC     = $(CCACHE) $(ARM_SDK_PREFIX)gcc
+CROSS_CXX    = $(CCACHE) $(ARM_SDK_PREFIX)g++
+CROSS_GDB    = $(ARM_SDK_PREFIX)gdb
+OBJCOPY      = $(ARM_SDK_PREFIX)objcopy
+OBJDUMP      = $(ARM_SDK_PREFIX)objdump
+READELF      = $(ARM_SDK_PREFIX)readelf
+SIZE         = $(ARM_SDK_PREFIX)size
+DFUSE-PACK  := src/utils/dfuse-pack.py
 
-# The list of targets to build for 'pre-push'
-ifeq ($(OSFAMILY), macosx)
-# SITL is not buildable on MacOS
-PRE_PUSH_TARGET_LIST ?= $(UNIFIED_TARGETS) STM32F4DISCOVERY_DEBUG test-representative
+# Command used to link the final ELF. Platform makefiles can override this
+# when linking requires a dedicated linker instead of the C compiler driver.
+# $(file ...) needs GNU make 4.0; macOS ships 3.81, which silently expands it to
+# nothing and leaves the linker looking for an arguments file that was never written.
+ifeq ($(filter 3.%,$(MAKE_VERSION)),)
+ELF_LINK_CMD = $(file > $@.args,$(filter-out %.ld,$^)) $(CROSS_CC) -o $@ @$@.args $(LD_FLAGS)
 else
-PRE_PUSH_TARGET_LIST ?= $(UNIFIED_TARGETS) SITL STM32F4DISCOVERY_DEBUG test-representative
+# Exported so the warning is emitted once, not once per recursive make invocation.
+ifndef OLD_MAKE_WARNED
+export OLD_MAKE_WARNED := 1
+$(warning GNU make $(MAKE_VERSION) detected, falling back to linking without an arguments file. Support for GNU make older than 4.0 may be dropped in a future release. macOS ships an old system make: install a current one with 'brew install make' and build with gmake.)
+endif
+ELF_LINK_CMD = $(CROSS_CC) -o $@ $(filter-out %.ld,$^) $(LD_FLAGS)
 endif
 
-include $(ROOT)/make/targets.mk
-
-REVISION := norevision
-ifeq ($(shell git diff --shortstat),)
-REVISION := $(shell git log -1 --format="%h")
-endif
-
-FC_VER_MAJOR := $(shell grep " FC_VERSION_MAJOR" src/main/build/version.h | awk '{print $$3}' )
-FC_VER_MINOR := $(shell grep " FC_VERSION_MINOR" src/main/build/version.h | awk '{print $$3}' )
-FC_VER_PATCH := $(shell grep " FC_VERSION_PATCH" src/main/build/version.h | awk '{print $$3}' )
-
-FC_VER := $(FC_VER_MAJOR).$(FC_VER_MINOR).$(FC_VER_PATCH)
+# Preprocessor helpers (generic .h parsing)
+include $(MAKE_SCRIPT_DIR)/preprocess.mk
 
 # Search path for sources
-VPATH           := $(SRC_DIR):$(SRC_DIR)/startup
-USBFS_DIR       = $(ROOT)/lib/main/STM32_USB-FS-Device_Driver
-USBPERIPH_SRC   = $(notdir $(wildcard $(USBFS_DIR)/src/*.c))
-FATFS_DIR       = $(ROOT)/lib/main/FatFS
-FATFS_SRC       = $(notdir $(wildcard $(FATFS_DIR)/*.c))
-
+VPATH           := $(SRC_DIR):$(LIB_MAIN_DIR):$(LIB_MODULES_DIR):$(PLATFORM_DIR)
+FATFS_DIR        = $(ROOT)/lib/main/FatFS
+FATFS_SRC        = $(notdir $(wildcard $(FATFS_DIR)/*.c))
 CSOURCES        := $(shell find $(SRC_DIR) -name '*.c')
+
+# import config handling (must occur after tool discovery and hydration)
+include $(MAKE_SCRIPT_DIR)/config.mk
+
+# default xtal value
+HSE_VALUE       ?= 8000000
+
+CI_EXCLUDED_TARGETS := $(sort $(notdir $(patsubst %/,%,$(dir $(wildcard $(PLATFORM_DIR)/*/target/*/.exclude)))))
+CI_COMMON_TARGETS   := STM32F4DISCOVERY CRAZYBEEF4SX1280 CRAZYBEEF4FR MATEKF405TE AIRBOTG4AIO TBS_LUCID_FC IFLIGHT_BLITZ_F722 NUCLEOF446 SPRACINGH7EXTREME SPRACINGH7RF SITL_X_PLANE
+CI_TARGETS          := $(filter-out $(CI_EXCLUDED_TARGETS), $(BASE_TARGETS) $(filter $(CI_COMMON_TARGETS), $(BASE_CONFIGS)))
+PREVIEW_TARGETS     := MATEKF411 AIKONF4V2 AIRBOTG4AIO ZEEZF7V3 FOXEERF745V4_AIO KAKUTEH7 TBS_LUCID_FC SITL SPRACINGH7EXTREME SPRACINGH7RF \
+                       APM32F405 GD32H757VI RASPBERRY_PI_UAVFC ACROBOC562 OPENN657V1 X32M7B STM32H562 ESP32S3
+
+TARGET_PLATFORM     := $(notdir $(patsubst %/,%,$(subst target/$(TARGET)/,, $(dir $(wildcard $(PLATFORM_DIR)/*/target/$(TARGET)/target.mk)))))
+TARGET_PLATFORM_DIR := $(PLATFORM_DIR)/$(TARGET_PLATFORM)
+LINKER_DIR          := $(TARGET_PLATFORM_DIR)/link
+
+ifneq ($(TARGET),)
+TARGET_DIR     = $(TARGET_PLATFORM_DIR)/target/$(TARGET)
+include $(TARGET_DIR)/target.mk
+endif
+
+REVISION := norevision
+ifneq ($(wildcard .git),)
+ifeq ($(shell git diff --shortstat),)
+REVISION := $(shell git rev-parse --short=9 HEAD)
+endif
+endif
 
 LD_FLAGS        :=
 EXTRA_LD_FLAGS  :=
@@ -142,16 +225,35 @@ EXTRA_LD_FLAGS  :=
 #
 # Default Tool options - can be overridden in {mcu}.mk files.
 #
+DEBUG_MIXED = no
+
+# Link-time optimisation is enabled by default. An {mcu}.mk can set "LTO := no"
+# (e.g. for an XIP / run-from-RAM layout that relies on per-function sections)
+# to strip the LTO flags from every optimisation profile and the link.
+LTO ?= yes
+
+# Promotion of float to double is treated as an error by default. An {mcu}.mk can
+# set "DOUBLE_PROMOTION := no" to disable the diagnostic entirely
+# (-Wno-double-promotion) instead.
+DOUBLE_PROMOTION ?= yes
+
+ifeq ($(DEBUG),INFO)
+DEBUG_MIXED = yes
+endif
+ifeq ($(DEBUG),GDB)
+DEBUG_MIXED = yes
+endif
+
 ifeq ($(DEBUG),GDB)
 OPTIMISE_DEFAULT      := -Og
 
 LTO_FLAGS             := $(OPTIMISE_DEFAULT)
-DEBUG_FLAGS            = -ggdb3 -DDEBUG
+DEBUG_FLAGS            = -ggdb2 -gdwarf-5 -DDEBUG
 else
 ifeq ($(DEBUG),INFO)
-DEBUG_FLAGS            = -ggdb3
+DEBUG_FLAGS            = -ggdb2
 endif
-OPTIMISATION_BASE     := -flto -fuse-linker-plugin -ffast-math -fmerge-all-constants
+OPTIMISATION_BASE     := -flto=auto -fuse-linker-plugin -ffast-math -fmerge-all-constants
 OPTIMISE_DEFAULT      := -O2
 OPTIMISE_SPEED        := -Ofast
 OPTIMISE_SIZE         := -Os
@@ -159,14 +261,37 @@ OPTIMISE_SIZE         := -Os
 LTO_FLAGS             := $(OPTIMISATION_BASE) $(OPTIMISE_SPEED)
 endif
 
-VPATH 			:= $(VPATH):$(ROOT)/make/mcu
-VPATH 			:= $(VPATH):$(ROOT)/make
+VPATH 			:= $(VPATH):$(MAKE_SCRIPT_DIR)
+
+ifneq ($(TARGET),)
 
 # start specific includes
-include $(ROOT)/make/mcu/$(TARGET_MCU).mk
+ifeq ($(TARGET_MCU),)
+$(error No TARGET_MCU specified. Is the target.mk valid for $(TARGET)?)
+endif
 
-# openocd specific includes
-include $(ROOT)/make/openocd.mk
+ifeq ($(TARGET_MCU_FAMILY),)
+$(error No TARGET_MCU_FAMILY specified. Is the target.mk valid for $(TARGET)?)
+endif
+
+TARGET_FLAGS := -D$(TARGET) -D$(TARGET_PLATFORM) -D$(TARGET_MCU_FAMILY) $(TARGET_FLAGS)
+
+ifneq ($(CONFIG),)
+TARGET_FLAGS := $(TARGET_FLAGS) -DUSE_CONFIG
+endif
+
+SPEED_OPTIMISED_SRC :=
+SIZE_OPTIMISED_SRC  :=
+
+include $(TARGET_PLATFORM_DIR)/mk/$(TARGET_MCU_FAMILY).mk
+
+# Feature source lists that fan out from the MCU's LIB_SUBMODULES opt-in.
+# Sourced after the MCU .mk so each feature file can check what the
+# platform asked for.
+include $(MAKE_SCRIPT_DIR)/dronecan.mk
+
+# Validate the platform toolchain is available
+include $(MAKE_SCRIPT_DIR)/tools_check.mk
 
 # Configure default flash sizes for the targets (largest size specified gets hit first) if flash not specified already.
 ifeq ($(TARGET_FLASH_SIZE),)
@@ -183,57 +308,57 @@ ifneq ($(HSE_VALUE),)
 DEVICE_FLAGS  := $(DEVICE_FLAGS) -DHSE_VALUE=$(HSE_VALUE)
 endif
 
-ifneq ($(FEATURE_CUT_LEVEL_SUPPLIED),)
-DEVICE_FLAGS  := $(DEVICE_FLAGS) -DFEATURE_CUT_LEVEL=$(FEATURE_CUT_LEVEL_SUPPLIED)
-else ifneq ($(FEATURE_CUT_LEVEL),)
-DEVICE_FLAGS  := $(DEVICE_FLAGS) -DFEATURE_CUT_LEVEL=$(FEATURE_CUT_LEVEL)
-endif
+endif # TARGET specified
 
-TARGET_DIR     = $(ROOT)/src/main/target/$(BASE_TARGET)
-TARGET_DIR_SRC = $(notdir $(wildcard $(TARGET_DIR)/*.c))
-
-ifeq ($(OPBL),yes)
-TARGET_FLAGS := -DOPBL $(TARGET_FLAGS)
-.DEFAULT_GOAL := binary
+ifeq ($(or $(CONFIG),$(TARGET)),)
+.DEFAULT_GOAL := all
 else
-.DEFAULT_GOAL := hex
+.DEFAULT_GOAL := fwo
 endif
 
-ifeq ($(CUSTOM_DEFAULTS_EXTENDED),yes)
-TARGET_FLAGS += -DUSE_CUSTOM_DEFAULTS=
-EXTRA_LD_FLAGS += -Wl,--defsym=USE_CUSTOM_DEFAULTS_EXTENDED=1
-endif
+# openocd specific includes
+include $(MAKE_SCRIPT_DIR)/openocd.mk
 
 INCLUDE_DIRS    := $(INCLUDE_DIRS) \
-                   $(ROOT)/lib/main/MAVLink
+                   $(ROOT)/lib/modules/mavlink
 
 INCLUDE_DIRS    := $(INCLUDE_DIRS) \
                    $(TARGET_DIR)
 
 VPATH           := $(VPATH):$(TARGET_DIR)
 
-include $(ROOT)/make/source.mk
+include $(MAKE_SCRIPT_DIR)/source.mk
+
+ifneq ($(TARGET),)
+ifneq ($(filter-out $(SRC),$(SPEED_OPTIMISED_SRC)),)
+$(error Speed optimised sources not valid: $(strip $(filter-out $(SRC),$(SPEED_OPTIMISED_SRC))))
+endif
+
+ifneq ($(filter-out $(SRC),$(SIZE_OPTIMISED_SRC)),)
+$(error Size optimised sources not valid: $(strip $(filter-out $(SRC),$(SIZE_OPTIMISED_SRC))))
+endif
+endif
 
 ###############################################################################
 # Things that might need changing to use different tools
 #
 
-# Find out if ccache is installed on the system
-CCACHE := ccache
-RESULT = $(shell (which $(CCACHE) > /dev/null 2>&1; echo $$?) )
-ifneq ($(RESULT),0)
-CCACHE :=
+#
+# Resolve per-family build toggles now that the {mcu}.mk has been included.
+#
+
+# Disabling LTO routes its flags through CFLAGS_DISABLED so they are stripped
+# from every optimisation profile (CC_*_OPTIMISATION) and from LTO_FLAGS/LD_FLAGS.
+ifeq ($(LTO),no)
+CFLAGS_DISABLED += -flto=auto -fuse-linker-plugin
 endif
 
-# Tool names
-CROSS_CC    := $(CCACHE) $(ARM_SDK_PREFIX)gcc
-CROSS_CXX   := $(CCACHE) $(ARM_SDK_PREFIX)g++
-CROSS_GDB   := $(ARM_SDK_PREFIX)gdb
-OBJCOPY     := $(ARM_SDK_PREFIX)objcopy
-OBJDUMP     := $(ARM_SDK_PREFIX)objdump
-READELF     := $(ARM_SDK_PREFIX)readelf
-SIZE        := $(ARM_SDK_PREFIX)size
-DFUSE-PACK  := src/utils/dfuse-pack.py
+# Select whether double-promotion is an error (default) or disabled entirely.
+ifeq ($(DOUBLE_PROMOTION),no)
+WARN_DOUBLE_PROMOTION := -Wno-double-promotion
+else
+WARN_DOUBLE_PROMOTION := -Wdouble-promotion
+endif
 
 #
 # Tool options.
@@ -242,40 +367,71 @@ CC_DEBUG_OPTIMISATION   := $(OPTIMISE_DEFAULT)
 CC_DEFAULT_OPTIMISATION := $(OPTIMISATION_BASE) $(OPTIMISE_DEFAULT)
 CC_SPEED_OPTIMISATION   := $(OPTIMISATION_BASE) $(OPTIMISE_SPEED)
 CC_SIZE_OPTIMISATION    := $(OPTIMISATION_BASE) $(OPTIMISE_SIZE)
-CC_NO_OPTIMISATION      := 
+CC_NO_OPTIMISATION      :=
+
+CC_DEBUG_OPTIMISATION   := $(filter-out $(CFLAGS_DISABLED), $(CC_DEBUG_OPTIMISATION))
+CC_DEFAULT_OPTIMISATION := $(filter-out $(CFLAGS_DISABLED), $(CC_DEFAULT_OPTIMISATION))
+CC_SPEED_OPTIMISATION   := $(filter-out $(CFLAGS_DISABLED), $(CC_SPEED_OPTIMISATION))
+CC_SIZE_OPTIMISATION    := $(filter-out $(CFLAGS_DISABLED), $(CC_SIZE_OPTIMISATION))
+CC_NO_OPTIMISATION      := $(filter-out $(CFLAGS_DISABLED), $(CC_NO_OPTIMISATION))
+
+
+# Extract version from the version header
+# The patch level comes from a YYYY.MM.N tag on HEAD matching the header's year and month, otherwise the header default applies
+FC_VERSION_YEAR  := $(call pp_def_value,src/main/build/version.h,FC_VERSION_YEAR)
+FC_VERSION_MONTH := $(call pp_def_value,src/main/build/version.h,FC_VERSION_MONTH)
+ifneq ($(wildcard .git),)
+FC_VERSION_PATCH_LEVEL := $(shell git tag --points-at HEAD 2>/dev/null | sed -n 's/^$(FC_VERSION_YEAR)\.$(FC_VERSION_MONTH)\.\([0-9]\{1,3\}\)$$/\1/p' | awk '$$1 <= 255 { print $$1 + 0 }' | sort -n | tail -n 1)
+endif
+ifneq ($(FC_VERSION_PATCH_LEVEL),)
+VERSION_FLAGS    := -DFC_VERSION_PATCH_LEVEL=$(FC_VERSION_PATCH_LEVEL)
+CPPFLAGS         += $(VERSION_FLAGS)
+endif
+
+# Expand FC_VERSION_STRING via the preprocessor; compute before finalizing CFLAGS
+FC_VER           := $(call pp_def_value_str,src/main/build/version.h,FC_VERSION_STRING)
 
 #
 # Added after GCC version update, remove once the warnings have been fixed
 #
 TEMPORARY_FLAGS :=
 
+EXTRA_WARNING_FLAGS := -Wold-style-definition
+
 CFLAGS     += $(ARCH_FLAGS) \
               $(addprefix -D,$(OPTIONS)) \
               $(addprefix -I,$(INCLUDE_DIRS)) \
+              $(addprefix -isystem,$(SYS_INCLUDE_DIRS)) \
               $(DEBUG_FLAGS) \
-              -std=gnu11 \
-              -Wall -Wextra -Wunsafe-loop-optimizations -Wdouble-promotion \
+              -std=gnu17 \
+              -Wall -Wextra -Werror -Wunsafe-loop-optimizations $(WARN_DOUBLE_PROMOTION) \
+              $(EXTRA_WARNING_FLAGS) \
               -ffunction-sections \
               -fdata-sections \
               -fno-common \
-              -pedantic \
               $(TEMPORARY_FLAGS) \
               $(DEVICE_FLAGS) \
               -D_GNU_SOURCE \
-              -DUSE_STDPERIPH_DRIVER \
               -D$(TARGET) \
               $(TARGET_FLAGS) \
               -D'__FORKNAME__="$(FORKNAME)"' \
               -D'__TARGET__="$(TARGET)"' \
+              -D'__MCU_NAME__="$(TARGET_MCU)"' \
               -D'__REVISION__="$(REVISION)"' \
-              -save-temps=obj \
+              -D'__FC_VERSION__="$(FC_VER)"' \
+              $(VERSION_FLAGS) \
+              $(CONFIG_REVISION_DEFINE) \
+              -pipe \
               -MMD -MP \
               $(EXTRA_FLAGS)
+
+CFLAGS     := $(filter-out $(CFLAGS_DISABLED), $(CFLAGS))
 
 ASFLAGS     = $(ARCH_FLAGS) \
               $(DEBUG_FLAGS) \
               -x assembler-with-cpp \
               $(addprefix -I,$(INCLUDE_DIRS)) \
+              $(addprefix -isystem,$(SYS_INCLUDE_DIRS)) \
               -MMD -MP
 
 ifeq ($(LD_FLAGS),)
@@ -297,6 +453,8 @@ LD_FLAGS     = -lm \
                $(EXTRA_LD_FLAGS)
 endif
 
+LTO_FLAGS               := $(filter-out $(CFLAGS_DISABLED), $(LTO_FLAGS))
+
 ###############################################################################
 # No user-serviceable parts below
 ###############################################################################
@@ -304,39 +462,66 @@ endif
 CPPCHECK        = cppcheck $(CSOURCES) --enable=all --platform=unix64 \
                   --std=c99 --inline-suppr --quiet --force \
                   $(addprefix -I,$(INCLUDE_DIRS)) \
+                  $(addprefix -isystem,$(SYS_INCLUDE_DIRS)) \
                   -I/usr/include -I/usr/include/linux
 
-ifeq ($(RELEASE),yes)
-TARGET_BASENAME = $(BIN_DIR)/$(FORKNAME)_$(FC_VER)_$(TARGET)
-else
-TARGET_BASENAME = $(BIN_DIR)/$(FORKNAME)_$(FC_VER)_$(TARGET)_$(REVISION)
+ifneq ($(filter fwo hex uf2 bin elf zip, $(MAKECMDGOALS)),)
+    ifeq ($(TARGET),)
+        $(error "You must specify a target to build.")
+    endif
 endif
 
+TARGET_NAME := $(TARGET)
+
+ifneq ($(CONFIG),)
+TARGET_NAME := $(TARGET_NAME)_$(CONFIG)
+endif
+
+TARGET_NAME_CLEAN := $(TARGET_NAME)
+
+ifeq ($(REV),yes)
+TARGET_NAME := $(TARGET_NAME)_$(REVISION)
+endif
+
+TARGET_FULLNAME = $(FORKNAME)_$(FC_VER)_$(TARGET_NAME)
 #
 # Things we will build
 #
-TARGET_BIN      = $(TARGET_BASENAME).bin
-TARGET_HEX      = $(TARGET_BASENAME).hex
-TARGET_DFU      = $(TARGET_BASENAME).dfu
-TARGET_ZIP      = $(TARGET_BASENAME).zip
-TARGET_ELF      = $(OBJECT_DIR)/$(FORKNAME)_$(TARGET).elf
-TARGET_EXST_ELF = $(OBJECT_DIR)/$(FORKNAME)_$(TARGET)_EXST.elf
-TARGET_UNPATCHED_BIN = $(OBJECT_DIR)/$(FORKNAME)_$(TARGET)_UNPATCHED.bin
-TARGET_LST      = $(OBJECT_DIR)/$(FORKNAME)_$(TARGET).lst
-TARGET_OBJS     = $(addsuffix .o,$(addprefix $(OBJECT_DIR)/$(TARGET)/,$(basename $(SRC))))
-TARGET_DEPS     = $(addsuffix .d,$(addprefix $(OBJECT_DIR)/$(TARGET)/,$(basename $(SRC))))
-TARGET_MAP      = $(OBJECT_DIR)/$(FORKNAME)_$(TARGET).map
+TARGET_BIN      := $(BIN_DIR)/$(TARGET_FULLNAME).bin
+TARGET_HEX      := $(BIN_DIR)/$(TARGET_FULLNAME).hex
+TARGET_UF2      := $(BIN_DIR)/$(TARGET_FULLNAME).uf2
+TARGET_EXE      := $(BIN_DIR)/$(TARGET_FULLNAME)
+TARGET_DFU      := $(BIN_DIR)/$(TARGET_FULLNAME).dfu
+TARGET_ZIP      := $(BIN_DIR)/$(TARGET_FULLNAME).zip
+TARGET_OBJ_DIR  := $(OBJECT_DIR)/$(TARGET_NAME)
+# Scoped under TARGET_OBJ_DIR, not the shared OBJECT_DIR: concurrent
+# `make TARGET=X` invocations (e.g. `make -jN all_configs`) each run their
+# own validate-deps, and a manifest shared across targets races on the
+# mv below when multiple targets build in parallel.
+SRC_MANIFEST    := $(TARGET_OBJ_DIR)/.src_manifest
+TARGET_ELF      := $(OBJECT_DIR)/$(FORKNAME)_$(TARGET_NAME).elf
+TARGET_EXST_ELF := $(OBJECT_DIR)/$(FORKNAME)_$(TARGET_NAME)_EXST.elf
+TARGET_UNPATCHED_BIN := $(OBJECT_DIR)/$(FORKNAME)_$(TARGET_NAME)_UNPATCHED.bin
+TARGET_LST      := $(OBJECT_DIR)/$(FORKNAME)_$(TARGET_NAME).lst
+TARGET_OBJS     := $(addsuffix .o,$(addprefix $(TARGET_OBJ_DIR)/,$(basename $(SRC))))
+TARGET_DEPS     := $(addsuffix .d,$(addprefix $(TARGET_OBJ_DIR)/,$(basename $(SRC))))
+TARGET_MAP      := $(OBJECT_DIR)/$(FORKNAME)_$(TARGET_NAME).map
 
-TARGET_EXST_HASH_SECTION_FILE = $(OBJECT_DIR)/$(TARGET)/exst_hash_section.bin
+TARGET_EXST_HASH_SECTION_FILE := $(TARGET_OBJ_DIR)/exst_hash_section.bin
 
-CLEAN_ARTIFACTS := $(TARGET_BIN)
-CLEAN_ARTIFACTS += $(TARGET_HEX)
-CLEAN_ARTIFACTS += $(TARGET_ELF) $(TARGET_OBJS) $(TARGET_MAP)
-CLEAN_ARTIFACTS += $(TARGET_LST)
-CLEAN_ARTIFACTS += $(TARGET_DFU)
+ifeq ($(DEBUG_MIXED),yes)
+TARGET_EF_HASH      := $(shell echo -n -- "$(EXTRA_FLAGS)" "$(OPTIONS)" "$(VERSION_FLAGS)" "$(DEVICE_FLAGS)" "$(TARGET_FLAGS)"  | openssl dgst -md5 -r | awk '{print $$1;}')
+else
+TARGET_EF_HASH      := $(shell echo -n -- "$(EXTRA_FLAGS)" "$(OPTIONS)" "$(VERSION_FLAGS)" "$(DEBUG_FLAGS)" "$(DEVICE_FLAGS)" "$(TARGET_FLAGS)"  | openssl dgst -md5 -r | awk '{print $$1;}')
+endif
+
+TARGET_EF_HASH_FILE := $(TARGET_OBJ_DIR)/.efhash_$(TARGET_EF_HASH)
+
+CLEAN_ARTIFACTS := $(TARGET_ELF) $(TARGET_ELF).args $(TARGET_EXST_ELF) $(TARGET_MAP)
+CLEAN_ARTIFACTS += $(wildcard $(BIN_DIR)/*$(TARGET_NAME_CLEAN)*)
 
 # Make sure build date and revision is updated on every incremental build
-$(OBJECT_DIR)/$(TARGET)/build/version.o : $(SRC)
+$(TARGET_OBJ_DIR)/build/version.o : $(SRC)
 
 # List of buildable ELF files and their object dependencies.
 # It would be nice to compute these lists, but that seems to be just beyond make.
@@ -345,10 +530,17 @@ $(TARGET_LST): $(TARGET_ELF)
 	$(V0) $(OBJDUMP) -S --disassemble $< > $@
 
 ifeq ($(EXST),no)
-$(TARGET_BIN): $(TARGET_ELF)
+$(TARGET_BIN): $(TARGET_ELF) $(BIN_FROM_ELF_DEPS)
 	@echo "Creating BIN $(TARGET_BIN)" "$(STDOUT)"
+# A platform may set BIN_FROM_ELF_CMD to generate the binary from the ELF its
+# own way (e.g. ESP32 wraps it into a bootable image with esptool elf2image);
+# otherwise fall back to a plain objcopy raw dump.
+ifdef BIN_FROM_ELF_CMD
+	$(V1) $(BIN_FROM_ELF_CMD)
+else
 	$(V1) $(OBJCOPY) -O binary $< $@
-	
+endif
+
 $(TARGET_HEX): $(TARGET_ELF)
 	@echo "Creating HEX $(TARGET_HEX)" "$(STDOUT)"
 	$(V1) $(OBJCOPY) -O ihex --set-start 0x8000000 $< $@
@@ -358,8 +550,6 @@ $(TARGET_DFU): $(TARGET_HEX)
 	$(V1) $(PYTHON) $(DFUSE-PACK) -i $< $@
 
 else
-CLEAN_ARTIFACTS += $(TARGET_UNPATCHED_BIN) $(TARGET_EXST_HASH_SECTION_FILE) $(TARGET_EXST_ELF)
-
 $(TARGET_UNPATCHED_BIN): $(TARGET_ELF)
 	@echo "Creating BIN (without checksum) $(TARGET_UNPATCHED_BIN)" "$(STDOUT)"
 	$(V1) $(OBJCOPY) -O binary $< $@
@@ -372,8 +562,8 @@ $(TARGET_BIN): $(TARGET_UNPATCHED_BIN)
 	$(V1) dd if=$(TARGET_UNPATCHED_BIN) of=$(TARGET_BIN) conv=notrunc
 
 	@echo "Generating MD5 hash of binary" "$(STDOUT)"
-	$(V1) openssl dgst -md5 $(TARGET_BIN) > $(TARGET_UNPATCHED_BIN).md5 
-	
+	$(V1) openssl dgst -md5 $(TARGET_BIN) > $(TARGET_UNPATCHED_BIN).md5
+
 	@echo "Patching MD5 hash into binary" "$(STDOUT)"
 	$(V1) cat $(TARGET_UNPATCHED_BIN).md5 | awk '{printf("%08x: %s",(1024*$(FIRMWARE_SIZE))-16,$$2);}' | xxd -r - $(TARGET_BIN)
 	$(V1) echo $(FIRMWARE_SIZE) | awk '{printf("-s 0x%08x -l 16 -c 16 %s",(1024*$$1)-16,"$(TARGET_BIN)");}' | xargs xxd
@@ -386,15 +576,12 @@ $(TARGET_BIN): $(TARGET_UNPATCHED_BIN)
 	@echo "Extracting HASH section from unpatched EXST elf $(TARGET_ELF)" "$(STDOUT)"
 	$(OBJCOPY) $(TARGET_ELF) $(TARGET_EXST_ELF).tmp --dump-section .exst_hash=$(TARGET_EXST_HASH_SECTION_FILE) -j .exst_hash
 	rm $(TARGET_EXST_ELF).tmp
-	
+
 	@echo "Patching MD5 hash into HASH section" "$(STDOUT)"
 	$(V1) cat $(TARGET_UNPATCHED_BIN).md5 | awk '{printf("%08x: %s",64-16,$$2);}' | xxd -r - $(TARGET_EXST_HASH_SECTION_FILE)
-	
-# For some currently unknown reason, OBJCOPY, with only input/output files, will generate a file around 2GB for the H730 unless we remove an unused-section
-# As a workaround drop the ._user_heap_stack section, which is only used during build to show errors if there's not enough space for the heap/stack. 
-# The issue can be seen with `readelf -S $(TARGET_EXST_ELF)' vs `readelf -S $(TARGET_ELF)`
+
 	$(V1) @echo "Patching updated HASH section into $(TARGET_EXST_ELF)" "$(STDOUT)"
-	$(OBJCOPY) $(TARGET_ELF) $(TARGET_EXST_ELF) --remove-section ._user_heap_stack --update-section .exst_hash=$(TARGET_EXST_HASH_SECTION_FILE)
+	$(OBJCOPY) $(TARGET_ELF) $(TARGET_EXST_ELF) --update-section .exst_hash=$(TARGET_EXST_HASH_SECTION_FILE)
 
 	$(V1) $(READELF) -S $(TARGET_EXST_ELF)
 	$(V1) $(READELF) -l $(TARGET_EXST_ELF)
@@ -408,20 +595,34 @@ $(TARGET_HEX): $(TARGET_BIN)
 endif
 
 $(TARGET_ELF): $(TARGET_OBJS) $(LD_SCRIPT) $(LD_SCRIPTS)
-	@echo "Linking $(TARGET)" "$(STDOUT)"
-	$(V1) $(CROSS_CC) -o $@ $(filter-out %.ld,$^) $(LD_FLAGS)
+	@echo "Linking $(TARGET_NAME)" "$(STDOUT)"
+	$(V1) $(ELF_LINK_CMD)
 	$(V1) $(SIZE) $(TARGET_ELF)
+
+$(TARGET_UF2): $(TARGET_ELF)
+	@echo "Creating UF2 $(TARGET_UF2)" "$(STDOUT)"
+	$(V1) $(PICOTOOL) uf2 convert $< $@ || { echo "Failed to convert ELF to UF2 format"; exit 1; }
+
+$(TARGET_EXE): $(TARGET_ELF)
+	@echo "Creating exe - copying $< to $@" "$(STDOUT)"
+	$(V1) cp $< $@
 
 # Compile
 
 ## compile_file takes two arguments: (1) optimisation description string and (2) optimisation compiler flag
+## SRC_CFLAGS_<filename> can override CFLAGS per source file (e.g. to suppress vendor warnings)
 define compile_file
 	echo "%% ($(1)) $<" "$(STDOUT)" && \
-	$(CROSS_CC) -c -o $@ $(CFLAGS) $(2) $<
+	$(CROSS_CC) -c -o $@ $(CFLAGS) $(SRC_CFLAGS_$(notdir $<)) $(2) $<
 endef
 
+## `paths` is a list of paths that will be replaced for checking of speed, and size optimised sources
+paths := $(SRC_DIR)/ $(LIB_MAIN_DIR)/ $(LIB_MODULES_DIR)/ $(PLATFORM_DIR)/
+subst_paths_for = $(foreach path,$(paths),$(filter-out $(1),$(subst $(path),,$(1))))
+subst_paths = $(strip $(if $(call subst_paths_for,$(1)), $(call subst_paths_for,$(1)), $(1)))
+
 ifeq ($(DEBUG),GDB)
-$(OBJECT_DIR)/$(TARGET)/%.o: %.c
+$(TARGET_OBJ_DIR)/%.o: %.c
 	$(V1) mkdir -p $(dir $@)
 	$(V1) $(if $(findstring $<,$(NOT_OPTIMISED_SRC)), \
 		$(call compile_file,not optimised, $(CC_NO_OPTIMISATION)) \
@@ -429,15 +630,15 @@ $(OBJECT_DIR)/$(TARGET)/%.o: %.c
 		$(call compile_file,debug,$(CC_DEBUG_OPTIMISATION)) \
 	)
 else
-$(OBJECT_DIR)/$(TARGET)/%.o: %.c
+$(TARGET_OBJ_DIR)/%.o: %.c
 	$(V1) mkdir -p $(dir $@)
 	$(V1) $(if $(findstring $<,$(NOT_OPTIMISED_SRC)), \
 		$(call compile_file,not optimised,$(CC_NO_OPTIMISATION)) \
 	, \
-		$(if $(findstring $(subst ./src/main/,,$<),$(SPEED_OPTIMISED_SRC)), \
+		$(if $(findstring $(call subst_paths,$<),$(SPEED_OPTIMISED_SRC)), \
 			$(call compile_file,speed optimised,$(CC_SPEED_OPTIMISATION)) \
 		, \
-			$(if $(findstring $(subst ./src/main/,,$<),$(SIZE_OPTIMISED_SRC)), \
+			$(if $(findstring $(call subst_paths,$<),$(SIZE_OPTIMISED_SRC)), \
 				$(call compile_file,size optimised,$(CC_SIZE_OPTIMISATION)) \
 			, \
 				$(call compile_file,optimised,$(CC_DEFAULT_OPTIMISATION)) \
@@ -447,64 +648,51 @@ $(OBJECT_DIR)/$(TARGET)/%.o: %.c
 endif
 
 # Assemble
-$(OBJECT_DIR)/$(TARGET)/%.o: %.s
+$(TARGET_OBJ_DIR)/%.o: %.s
 	$(V1) mkdir -p $(dir $@)
 	@echo "%% $(notdir $<)" "$(STDOUT)"
 	$(V1) $(CROSS_CC) -c -o $@ $(ASFLAGS) $<
 
-$(OBJECT_DIR)/$(TARGET)/%.o: %.S
+$(TARGET_OBJ_DIR)/%.o: %.S
 	$(V1) mkdir -p $(dir $@)
 	@echo "%% $(notdir $<)" "$(STDOUT)"
 	$(V1) $(CROSS_CC) -c -o $@ $(ASFLAGS) $<
-
 
 ## all               : Build all currently built targets
 all: $(CI_TARGETS)
 
-## all_all : Build all targets (including legacy / unsupported)
-all_all: $(VALID_TARGETS)
+.PHONY: $(BASE_TARGETS)
+$(BASE_TARGETS):
+	$(MAKE) fwo TARGET=$@
 
-## unified : build all Unified Targets
-unified: $(UNIFIED_TARGETS)
+TARGETS_CLEAN = $(addsuffix _clean,$(BASE_TARGETS))
 
-## unified_zip : build all Unified Targets as zip files (for posting on GitHub)
-unified_zip: $(addsuffix _clean,$(UNIFIED_TARGETS)) $(addsuffix _zip,$(UNIFIED_TARGETS))
-
-## legacy : Build legacy targets
-legacy: $(LEGACY_TARGETS)
-
-## unsupported : Build unsupported targets
-unsupported: $(UNSUPPORTED_TARGETS)
-
-## pre-push : The minimum verification that should be run before pushing, to check if CI has a chance of succeeding
-pre-push:
-	$(MAKE) $(addsuffix _clean,$(PRE_PUSH_TARGET_LIST)) $(PRE_PUSH_TARGET_LIST) EXTRA_FLAGS=-Werror
-
-## targets-group-1   : build some targets
-targets-group-1: $(GROUP_1_TARGETS)
-
-## targets-group-2   : build some targets
-targets-group-2: $(GROUP_2_TARGETS)
-
-## targets-group-rest: build the rest of the targets (not listed in the other groups)
-targets-group-rest: $(GROUP_OTHER_TARGETS)
-
-$(VALID_TARGETS):
-	$(V0) @echo "Building $@" && \
-	$(MAKE) hex TARGET=$@ && \
-	echo "Building $@ succeeded."
-
-$(NOBUILD_TARGETS):
-	$(MAKE) TARGET=$@
-
-TARGETS_CLEAN = $(addsuffix _clean,$(VALID_TARGETS))
+CONFIGS_CLEAN = $(addsuffix _clean,$(BASE_CONFIGS))
 
 ## clean             : clean up temporary / machine-generated files
 clean:
-	@echo "Cleaning $(TARGET)"
-	$(V0) rm -f $(CLEAN_ARTIFACTS)
-	$(V0) rm -rf $(OBJECT_DIR)/$(TARGET)
-	@echo "Cleaning $(TARGET) succeeded."
+ifeq ($(strip $(TARGET_NAME)),)
+	@echo "No TARGET/CONFIG name specified. Performing full cleanup of $(BIN_DIR)"
+	@if [ -d "$(BIN_DIR)" ]; then \
+		echo "Removing directory: $(BIN_DIR)"; \
+		rm -rf "$(BIN_DIR)"; \
+	fi
+	@echo "Cleaning all succeeded."
+else
+	@echo "Cleaning $(TARGET_NAME)"
+	$(eval FILES_TO_REMOVE := $(wildcard $(CLEAN_ARTIFACTS)))
+	@if [ -n "$(FILES_TO_REMOVE)" ]; then \
+		echo "Removing artifacts:"; \
+		echo $(FILES_TO_REMOVE) | tr ' ' '\n'; \
+		rm -f $(FILES_TO_REMOVE); \
+	fi
+	@if [ -d "$(TARGET_OBJ_DIR)" ]; then \
+		echo "Removing object directory:"; \
+		echo $(TARGET_OBJ_DIR); \
+		rm -rf $(TARGET_OBJ_DIR); \
+	fi
+	@echo "Cleaning $(TARGET_NAME) succeeded."
+endif
 
 ## test_clean        : clean up temporary / machine-generated files (tests)
 test-%_clean:
@@ -515,12 +703,32 @@ test_clean:
 
 ## <TARGET>_clean    : clean up one specific target (alias for above)
 $(TARGETS_CLEAN):
-	$(V0) $(MAKE) -j TARGET=$(subst _clean,,$@) clean
+	$(V0) $(MAKE) $(MAKE_PARALLEL) TARGET=$(subst _clean,,$@) clean
 
-## clean_all         : clean all valid targets
+## <CONFIG>_clean    : clean up one specific target (alias for above)
+$(CONFIGS_CLEAN):
+	$(V0) $(MAKE) $(MAKE_PARALLEL) CONFIG=$(subst _clean,,$@) clean
+
+## clean_all         : clean all targets
 clean_all: $(TARGETS_CLEAN) test_clean
 
-TARGETS_FLASH = $(addsuffix _flash,$(VALID_TARGETS))
+## preview           : build one target for each platform and execute make test
+# Hydrate the configs and platform SDKs first, one at a time: parallel
+# `git submodule update --init` runs contend for the .git/config lock.
+# The build then runs in a new make, so BASE_CONFIGS (resolved at parse
+# time) includes the configs hydrated here.
+.PHONY: preview preview_build
+preview:
+	$(V0) [ -d "$(CONFIG_DIR)/configs" ] || $(MAKE) -j1 configs
+	$(V0) $(MAKE) -j1 $(AUTOHYDRATE_STAMPS) platform-sdk-hydrate
+	$(V0) $(MAKE) preview_build
+
+preview_build: $(PREVIEW_TARGETS) test
+
+## all_configs       : Build all configs
+all_configs: $(BASE_CONFIGS)
+
+TARGETS_FLASH = $(addsuffix _flash,$(BASE_TARGETS))
 
 ## <TARGET>_flash    : build and flash a target
 $(TARGETS_FLASH):
@@ -558,27 +766,102 @@ openocd-gdb: $(TARGET_ELF)
 	$(V0) $(OPENOCD_COMMAND) & $(CROSS_GDB) $(TARGET_ELF) -ex "target remote localhost:3333" -ex "load"
 endif
 
-TARGETS_ZIP = $(addsuffix _zip,$(VALID_TARGETS))
+TARGETS_ZIP = $(addsuffix _zip,$(BASE_TARGETS))
 
 ## <TARGET>_zip    : build target and zip it (useful for posting to GitHub)
+.PHONY: $(TARGETS_ZIP)
 $(TARGETS_ZIP):
-	$(V0) $(MAKE) hex TARGET=$(subst _zip,,$@)
-	$(V0) $(MAKE) zip TARGET=$(subst _zip,,$@)
+	$(V1) $(MAKE) $(MAKE_PARALLEL) zip TARGET=$(subst _zip,,$@)
 
-zip:
-	$(V0) zip $(TARGET_ZIP) $(TARGET_HEX)
+.PHONY: zip
+zip: $(TARGET_HEX)
+	$(V1) zip $(TARGET_ZIP) $(TARGET_HEX)
 
-binary:
-	$(V0) $(MAKE) -j $(TARGET_BIN)
+# Stamp rule for any submodule listed in $(AUTOHYDRATE_SUBMODULES) (i.e.
+# any .gitmodules entry that doesn't have `update = none`). The stamp is
+# the submodule's `.git` pointer, which exists only after a successful
+# `git submodule update --init`, so Make treats it as up-to-date on
+# subsequent runs — hydration stays idempotent and cheap.
+$(AUTOHYDRATE_STAMPS):
+	@echo "Hydrating submodule: $(@:/.git=)"
+	$(V1) git submodule update --init -- "$(@:/.git=)" \
+	    || { echo "submodule update failed: $(@:/.git=)"; exit 1; }
 
-hex:
-	$(V0) $(MAKE) -j $(TARGET_HEX)
+# Drop .d files when a source is removed (deleted, moved, or promoted to
+# a submodule). gcc's -MMD pins the .o to the old path; without cleanup
+# make bails with "No rule to make target <old-path>". A manifest of all
+# compiled sources is written to $(SRC_MANIFEST); on each build we compare
+# the current source list against it. If any sources were removed all .d
+# files are deleted so gcc can regenerate them cleanly. If nothing changed
+# the cost is a single cmp call.
+.PHONY: validate-deps
+validate-deps:
+ifeq ($(V),1)
+	@echo "Build parallelism: $(if $(filter -j,$(MAKEFLAGS)),unlimited,$(patsubst -j%,%,$(filter -j%,$(MAKEFLAGS) $(MAKE_PARALLEL)))) jobs"
+endif
+	$(V1) mkdir -p "$(TARGET_OBJ_DIR)"; \
+	printf '%s\n' $(SRC) | sort > "$(SRC_MANIFEST).new"; \
+	if [ ! -f "$(SRC_MANIFEST)" ]; then \
+	    find "$(TARGET_OBJ_DIR)" -name '*.d' -delete 2>/dev/null; \
+	elif ! cmp -s "$(SRC_MANIFEST)" "$(SRC_MANIFEST).new"; then \
+	    if comm -23 "$(SRC_MANIFEST)" "$(SRC_MANIFEST).new" | grep -q .; then \
+	        echo "Sources removed — clearing stale dependency files"; \
+	        find "$(TARGET_OBJ_DIR)" -name '*.d' -delete 2>/dev/null; \
+	    fi; \
+	fi; \
+	mv -f "$(SRC_MANIFEST).new" "$(SRC_MANIFEST)"
 
+.PHONY: binary
+binary: $(PLATFORM_SDK_STAMP) $(AUTOHYDRATE_STAMPS) validate-deps
+	$(V1) $(MAKE) $(MAKE_PARALLEL) $(TARGET_BIN)
+
+.PHONY: hex
+hex: $(PLATFORM_SDK_STAMP) $(AUTOHYDRATE_STAMPS) validate-deps
+	$(V1) $(MAKE) $(MAKE_PARALLEL) $(TARGET_HEX)
+
+.PHONY: uf2
+uf2: $(PLATFORM_SDK_STAMP) $(AUTOHYDRATE_STAMPS) validate-deps
+	$(V1) $(MAKE) $(MAKE_PARALLEL) $(TARGET_UF2)
+
+.PHONY: exe
+exe: $(AUTOHYDRATE_STAMPS) validate-deps
+	$(V1) $(MAKE) $(MAKE_PARALLEL) $(TARGET_EXE)
+
+.PHONY: elf
+elf: $(PLATFORM_SDK_STAMP) $(AUTOHYDRATE_STAMPS) validate-deps
+	$(V1) $(MAKE) $(MAKE_PARALLEL) $(TARGET_ELF)
+
+# FWO (Firmware Output) is the default output for building the firmware
+.PHONY: fwo
+fwo:
+ifeq ($(DEFAULT_OUTPUT),exe)
+	$(V1) $(MAKE) exe
+else ifeq ($(DEFAULT_OUTPUT),elf)
+	$(V1) $(MAKE) elf
+else ifeq ($(DEFAULT_OUTPUT),uf2)
+	$(V1) $(MAKE) uf2
+else ifeq ($(DEFAULT_OUTPUT),bin)
+	$(V1) $(MAKE) binary
+else
+	$(V1) $(MAKE) hex
+endif
+
+TARGETS_REVISION = $(addsuffix _rev, $(BASE_TARGETS))
+## <TARGET>_rev    : build target and add revision to filename
+.PHONY: $(TARGETS_REVISION)
+$(TARGETS_REVISION):
+	$(V1) $(MAKE) fwo REV=yes TARGET=$(subst _rev,,$@)
+
+.PHONY: all_rev
+all_rev: $(addsuffix _rev, $(CI_TARGETS))
+
+.PHONY: unbrick_$(TARGET)
 unbrick_$(TARGET): $(TARGET_HEX)
 	$(V0) stty -F $(SERIAL_DEVICE) raw speed 115200 -crtscts cs8 -parenb -cstopb -ixon
 	$(V0) stm32flash -w $(TARGET_HEX) -v -g 0x0 -b 115200 $(SERIAL_DEVICE)
 
 ## unbrick           : unbrick flight controller
+.PHONY: unbrick
 unbrick: unbrick_$(TARGET)
 
 ## cppcheck          : run static analysis on C source code
@@ -589,50 +872,96 @@ cppcheck-result.xml: $(CSOURCES)
 	$(V0) $(CPPCHECK) --xml-version=2 2> cppcheck-result.xml
 
 # mkdirs
-$(DL_DIR):
-	mkdir -p $@
-
-$(TOOLS_DIR):
+$(DIRECTORIES):
 	mkdir -p $@
 
 ## version           : print firmware version
+.PHONY: version
 version:
-	@echo $(FC_VER)
+	@echo '$(FC_VER)'
 
 ## help              : print this help message and exit
-help: Makefile make/tools.mk
+help: Makefile mk/tools.mk
 	@echo ""
 	@echo "Makefile for the $(FORKNAME) firmware"
 	@echo ""
 	@echo "Usage:"
-	@echo "        make [V=<verbosity>] [TARGET=<target>] [OPTIONS=\"<options>\"]"
+	@echo "        make [V=<verbosity>] [TARGET=<target>] [OPTIONS=\"<options>\"] [EXTRA_FLAGS=\"<extra_flags>\"]"
 	@echo "Or:"
-	@echo "        make <target> [V=<verbosity>] [OPTIONS=\"<options>\"]"
+	@echo "        make <target> [V=<verbosity>] [OPTIONS=\"<options>\"] [EXTRA_FLAGS=\"<extra_flags>\"]"
+	@echo "Or:"
+	@echo "        make <config-target> [V=<verbosity>] [OPTIONS=\"<options>\"] [EXTRA_FLAGS=\"<extra_flags>\"]"
 	@echo ""
-	@echo "Valid TARGET values are: $(VALID_TARGETS)"
+	@echo "To populate configuration targets:"
+	@echo "        make configs"
+	@echo ""
+	@echo "Valid TARGET values are: $(BASE_TARGETS)"
 	@echo ""
 	@sed -n 's/^## //p' $?
 
 ## targets           : print a list of all valid target platforms (for consumption by scripts)
 targets:
-	@echo "Valid targets:       $(VALID_TARGETS)"
+	@echo "Platforms:           $(PLATFORMS)"
+	@echo "Valid targets:       $(BASE_TARGETS)"
 	@echo "Built targets:       $(CI_TARGETS)"
-	@echo "Unified targets:     $(UNIFIED_TARGETS)"
-	@echo "Legacy targets:      $(LEGACY_TARGETS)"
-	@echo "Unsupported targets: $(UNSUPPORTED_TARGETS)"
 	@echo "Default target:      $(TARGET)"
-	@echo "targets-group-1:     $(GROUP_1_TARGETS)"
-	@echo "targets-group-2:     $(GROUP_2_TARGETS)"
-	@echo "targets-group-rest:  $(GROUP_OTHER_TARGETS)"
+	@echo "CI common targets:   $(CI_COMMON_TARGETS)"
+	@echo "CI excluded targets: $(CI_EXCLUDED_TARGETS)"
+	@echo "Preview targets:     $(PREVIEW_TARGETS)"
 
-	@echo "targets-group-1:     $(words $(GROUP_1_TARGETS)) targets"
-	@echo "targets-group-2:     $(words $(GROUP_2_TARGETS)) targets"
-	@echo "targets-group-rest:  $(words $(GROUP_OTHER_TARGETS)) targets"
-	@echo "total in all groups  $(words $(CI_TARGETS)) targets"
+targets-ci-print:
+	@echo $(CI_TARGETS)
+
+## targets-ci-grouped-print : print CI targets grouped by SDK (one "sdk:target1 target2 ..." per line)
+targets-ci-grouped-print:
+	@( \
+		for f in $(PLATFORM_DIR)/*/mk/*.mk; do \
+			family=$$(basename "$$f" .mk); \
+			sdk=$$(grep -m1 '^PLATFORM_SDK[[:space:]]*:=' "$$f" 2>/dev/null | sed 's/.*:=[[:space:]]*//'); \
+			[ -n "$$sdk" ] && echo "FAMILY $$family $$sdk"; \
+		done; \
+		for f in $(PLATFORM_DIR)/*/target/*/target.mk; do \
+			target=$$(basename "$$(dirname "$$f")"); \
+			family=$$(grep -m1 'TARGET_MCU_FAMILY[[:space:]]*:=' "$$f" | sed 's/.*:=[[:space:]]*//'); \
+			[ -n "$$family" ] && echo "TARGET $$target $$family"; \
+		done; \
+		for t in $(CI_TARGETS); do \
+			config_h="$(CONFIG_DIR)/configs/$$t/config.h"; \
+			if [ ! -f "$$config_h" ]; then \
+				config_h=""; \
+				for c in $(CONFIG_DIR)/configs/*/$$t/config.h; do \
+					[ -f "$$c" ] || continue; \
+					if [ -n "$$config_h" ]; then echo "Ambiguous CI target $$t matches multiple configs" >&2; config_h=""; break; fi; \
+					config_h="$$c"; \
+				done; \
+			fi; \
+			if [ -n "$$config_h" ]; then \
+				mcu=$$(grep -m1 'FC_TARGET_MCU' "$$config_h" | awk '{print $$NF}'); \
+				echo "CONFIG $$t $$mcu"; \
+			fi; \
+		done; \
+		for t in $(CI_TARGETS); do echo "CI $$t"; done \
+	) | awk ' \
+		/^FAMILY/ { family_sdk[$$2] = $$3 } \
+		/^TARGET/ { target_family[$$2] = $$3 } \
+		/^CONFIG/ { config_target[$$2] = $$3 } \
+		/^CI/ { \
+			t = $$2; \
+			family = target_family[t]; \
+			if (family == "") { mcu = config_target[t]; family = target_family[mcu] } \
+			sdk = family_sdk[family]; \
+			if (sdk == "") { \
+				printf("Unable to resolve PLATFORM_SDK for CI target %s (family=%s)\n", t, family) > "/dev/stderr"; \
+				exit 1; \
+			} \
+			grouped[sdk] = grouped[sdk] ? grouped[sdk] " " t : t \
+		} \
+		END { for (sdk in grouped) print sdk ":" grouped[sdk] } \
+	'
 
 ## target-mcu        : print the MCU type of the target
 target-mcu:
-	@echo $(TARGET_MCU)
+	@echo "$(TARGET_MCU_FAMILY) : $(TARGET_MCU)"
 
 ## targets-by-mcu    : make all targets that have a MCU_TYPE mcu
 targets-by-mcu:
@@ -653,38 +982,11 @@ targets-by-mcu:
 	done
 	@echo
 
-## targets-f3        : make all F3 targets
-targets-f3:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F3 TARGETS="$(VALID_TARGETS)" DO_BUILD=1
-
-targets-f3-print:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F3 TARGETS="$(VALID_TARGETS)"
-
-## targets-f4        : make all F4 targets
-targets-f4:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F4 TARGETS="$(VALID_TARGETS)" DO_BUILD=1
-
-targets-f4-print:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F4 TARGETS="$(VALID_TARGETS)"
-
-targets-ci-f4-print:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F4 TARGETS="$(CI_TARGETS)"
-
-## targets-f7        : make all F7 targets
-targets-f7:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F7 TARGETS="$(VALID_TARGETS)" DO_BUILD=1
-
-targets-f7-print:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F7 TARGETS="$(VALID_TARGETS)"
-
-targets-ci-f7-print:
-	$(V1) $(MAKE) -s targets-by-mcu MCU_TYPE=STM32F7 TARGETS="$(CI_TARGETS)"
-
 ## test              : run the Betaflight test suite
 ## junittest         : run the Betaflight test suite, producing Junit XML result files.
 ## test-representative: run a representative subset of the Betaflight test suite (i.e. run all tests, but run each expanded test only for one target)
 ## test-all: run the Betaflight test suite including all per-target expanded tests
-test junittest test-all test-representative:
+test junittest test-all test-representative: $(AUTOHYDRATE_STAMPS)
 	$(V0) cd src/test && $(MAKE) $@
 
 ## test_help         : print the help message for the test suite (including a list of the available tests)
@@ -696,12 +998,17 @@ test_versions:
 	$(V0) cd src/test && $(MAKE) versions
 
 ## test_%            : run test 'test_%' from the test suite
-test_%:
+test_%: $(AUTOHYDRATE_STAMPS)
 	$(V0) cd src/test && $(MAKE) $@
 
+$(TARGET_EF_HASH_FILE):
+	$(V1) mkdir -p $(dir $@)
+	$(V1) rm -f $(TARGET_OBJ_DIR)/.efhash_*
+	@echo "EF HASH -> $(TARGET_EF_HASH_FILE)"
+	$(V1) touch $(TARGET_EF_HASH_FILE)
 
-# rebuild everything when makefile changes
-$(TARGET_OBJS): Makefile $(TARGET_DIR)/target.mk $(wildcard make/*)
+# rebuild everything when makefile changes or the extra flags have changed
+$(TARGET_OBJS): $(TARGET_EF_HASH_FILE) Makefile $(TARGET_DIR)/target.mk $(wildcard make/*) $(CONFIG_FILE) | $(PLATFORM_SDK_STAMP)
 
 # include auto-generated dependencies
 -include $(TARGET_DEPS)

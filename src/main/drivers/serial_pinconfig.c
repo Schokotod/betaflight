@@ -24,7 +24,7 @@
 
 #include "platform.h"
 
-#ifdef USE_UART
+#if SERIAL_TRAIT_PIN_CONFIG
 
 #include "build/build_config.h"
 
@@ -34,238 +34,15 @@
 
 #include "pg/pg_ids.h"
 
-// Backward compatibility for exisiting targets
-
-// F1 targets don't explicitly define pins.
-
-#ifdef STM32F1
-#ifdef USE_UART1
-#ifndef UART1_RX_PIN
-#define UART1_RX_PIN        PA10
-#endif
-#ifndef UART1_TX_PIN
-#define UART1_TX_PIN        PA9
-#endif
-#endif // USE_UART1
-
-#ifdef USE_UART2
-#ifndef UART2_RX_PIN
-#define UART2_RX_PIN        PA3
-#endif
-#ifndef UART2_TX_PIN
-#define UART2_TX_PIN        PA2
-#endif
-#endif // USE_UART2
-#endif // STM32F1
-
-// XXX Is there an F3 target that does not define UART pins?
-
-#ifdef STM32F3
-#ifdef USE_UART1
-#ifndef UART1_TX_PIN
-#define UART1_TX_PIN        PA9
-#endif
-#ifndef UART1_RX_PIN
-#define UART1_RX_PIN        PA10
-#endif
-#endif
-
-#ifdef USE_UART2
-#ifndef UART2_TX_PIN
-#define UART2_TX_PIN        PD5
-#endif
-#ifndef UART2_RX_PIN
-#define UART2_RX_PIN        PD6
-#endif
-#endif
-
-#ifdef USE_UART3
-#ifndef UART3_TX_PIN
-#define UART3_TX_PIN        PB10
-#endif
-#ifndef UART3_RX_PIN
-#define UART3_RX_PIN        PB11
-#endif
-#endif
-
-#ifdef USE_UART4
-#ifndef UART4_TX_PIN
-#define UART4_TX_PIN        PC10
-#endif
-#ifndef UART4_RX_PIN
-#define UART4_RX_PIN        PC11
-#endif
-#endif
-
-#ifdef USE_UART5
-#ifndef UART5_TX_PIN
-#define UART5_TX_PIN        PC12
-#endif
-#ifndef UART5_RX_PIN
-#define UART5_RX_PIN        PD2
-#endif
-#endif
-#endif // STM32F3
-
-// Default pin (NONE).
-
-#ifdef USE_UART1
-# if !defined(UART1_RX_PIN)
-#  define UART1_RX_PIN NONE
-# endif
-# if !defined(UART1_TX_PIN)
-#  define UART1_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART1)
-#  define INVERTER_PIN_UART1 NONE
-# endif
-#endif
-
-#ifdef USE_UART2
-# if !defined(UART2_RX_PIN)
-#  define UART2_RX_PIN NONE
-# endif
-# if !defined(UART2_TX_PIN)
-#  define UART2_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART2)
-#  define INVERTER_PIN_UART2 NONE
-# endif
-#endif
-
-#ifdef USE_UART3
-# if !defined(UART3_RX_PIN)
-#  define UART3_RX_PIN NONE
-# endif
-# if !defined(UART3_TX_PIN)
-#  define UART3_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART3)
-#  define INVERTER_PIN_UART3 NONE
-# endif
-#endif
-
-#ifdef USE_UART4
-# if !defined(UART4_RX_PIN)
-#  define UART4_RX_PIN NONE
-# endif
-# if !defined(UART4_TX_PIN)
-#  define UART4_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART4)
-#  define INVERTER_PIN_UART4 NONE
-# endif
-#endif
-
-#ifdef USE_UART5
-# if !defined(UART5_RX_PIN)
-#  define UART5_RX_PIN NONE
-# endif
-# if !defined(UART5_TX_PIN)
-#  define UART5_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART5)
-#  define INVERTER_PIN_UART5 NONE
-# endif
-#endif
-
-#ifdef USE_UART6
-# if !defined(UART6_RX_PIN)
-#  define UART6_RX_PIN NONE
-# endif
-# if !defined(UART6_TX_PIN)
-#  define UART6_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART6)
-#  define INVERTER_PIN_UART6 NONE
-# endif
-#endif
-
-#ifdef USE_UART7
-# if !defined(UART7_RX_PIN)
-#  define UART7_RX_PIN NONE
-# endif
-# if !defined(UART7_TX_PIN)
-#  define UART7_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART7)
-#  define INVERTER_PIN_UART7 NONE
-# endif
-#endif
-
-#ifdef USE_UART8
-# if !defined(UART8_RX_PIN)
-#  define UART8_RX_PIN NONE
-# endif
-# if !defined(UART8_TX_PIN)
-#  define UART8_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART8)
-#  define INVERTER_PIN_UART8 NONE
-# endif
-#endif
-
-#ifdef USE_UART9
-# if !defined(UART9_RX_PIN)
-#  define UART9_RX_PIN NONE
-# endif
-# if !defined(UART9_TX_PIN)
-#  define UART9_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART9)
-#  define INVERTER_PIN_UART9 NONE
-# endif
-#endif
-
-#ifdef USE_UART10
-# if !defined(UART10_RX_PIN)
-#  define UART10_RX_PIN NONE
-# endif
-# if !defined(UART10_TX_PIN)
-#  define UART10_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_UART10)
-#  define INVERTER_PIN_UART10 NONE
-# endif
-#endif
-
-#ifdef USE_LPUART1
-# if !defined(LPUART1_RX_PIN)
-#  define LPUART1_RX_PIN NONE
-# endif
-# if !defined(LPUART1_TX_PIN)
-#  define LPUART1_TX_PIN NONE
-# endif
-# if !defined(INVERTER_PIN_LPUART1)
-#  define INVERTER_PIN_LPUART1 NONE
-# endif
-#endif
-
-#ifdef USE_SOFTSERIAL1
-# if !defined(SOFTSERIAL1_RX_PIN)
-#  define SOFTSERIAL1_RX_PIN NONE
-# endif
-# if !defined(SOFTSERIAL1_TX_PIN)
-#  define SOFTSERIAL1_TX_PIN NONE
-# endif
-#endif
-
-#ifdef USE_SOFTSERIAL2
-# if !defined(SOFTSERIAL2_RX_PIN)
-#  define SOFTSERIAL2_RX_PIN NONE
-# endif
-# if !defined(SOFTSERIAL2_TX_PIN)
-#  define SOFTSERIAL2_TX_PIN NONE
-# endif
-#endif
-
-#if defined(USE_UART) || defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL1)
 typedef struct serialDefaultPin_s {
     serialPortIdentifier_e ident;
     ioTag_t rxIO, txIO, inverterIO;
 } serialDefaultPin_t;
 
 static const serialDefaultPin_t serialDefaultPin[] = {
+#ifdef USE_UART0
+    { SERIAL_PORT_UART0, IO_TAG(UART0_RX_PIN), IO_TAG(UART0_TX_PIN), IO_TAG(INVERTER_PIN_UART0) },
+#endif
 #ifdef USE_UART1
     { SERIAL_PORT_USART1, IO_TAG(UART1_RX_PIN), IO_TAG(UART1_TX_PIN), IO_TAG(INVERTER_PIN_UART1) },
 #endif
@@ -296,8 +73,23 @@ static const serialDefaultPin_t serialDefaultPin[] = {
 #ifdef USE_UART10
     { SERIAL_PORT_USART10, IO_TAG(UART10_RX_PIN), IO_TAG(UART10_TX_PIN), IO_TAG(INVERTER_PIN_UART10) },
 #endif
+#ifdef USE_UART11
+    { SERIAL_PORT_UART11, IO_TAG(UART11_RX_PIN), IO_TAG(UART11_TX_PIN), IO_TAG(INVERTER_PIN_UART11) },
+#endif
+#ifdef USE_UART12
+    { SERIAL_PORT_UART12, IO_TAG(UART12_RX_PIN), IO_TAG(UART12_TX_PIN), IO_TAG(INVERTER_PIN_UART12) },
+#endif
+#ifdef USE_UART13
+    { SERIAL_PORT_UART13, IO_TAG(UART13_RX_PIN), IO_TAG(UART13_TX_PIN), IO_TAG(INVERTER_PIN_UART13) },
+#endif
+#ifdef USE_UART14
+    { SERIAL_PORT_UART14, IO_TAG(UART14_RX_PIN), IO_TAG(UART14_TX_PIN), IO_TAG(INVERTER_PIN_UART14) },
+#endif
+#ifdef USE_UART15
+    { SERIAL_PORT_UART15, IO_TAG(UART15_RX_PIN), IO_TAG(UART15_TX_PIN), IO_TAG(INVERTER_PIN_UART15) },
+#endif
 #ifdef USE_LPUART1
-    { SERIAL_PORT_LPUART1, IO_TAG(LPUART1_RX_PIN), IO_TAG(LPUART1_TX_PIN), IO_TAG(INVERTER_PIN_LPUART1) },
+    { SERIAL_PORT_LPUART1, IO_TAG(LPUART1_RX_PIN), IO_TAG(LPUART1_TX_PIN), IO_TAG(NONE) },
 #endif
 #ifdef USE_SOFTSERIAL1
     { SERIAL_PORT_SOFTSERIAL1, IO_TAG(SOFTSERIAL1_RX_PIN), IO_TAG(SOFTSERIAL1_TX_PIN), IO_TAG(NONE) },
@@ -305,18 +97,55 @@ static const serialDefaultPin_t serialDefaultPin[] = {
 #ifdef USE_SOFTSERIAL2
     { SERIAL_PORT_SOFTSERIAL2, IO_TAG(SOFTSERIAL2_RX_PIN), IO_TAG(SOFTSERIAL2_TX_PIN), IO_TAG(NONE) },
 #endif
+#ifdef USE_PIOUART0
+    { SERIAL_PORT_PIOUART0, IO_TAG(PIOUART0_RX_PIN), IO_TAG(PIOUART0_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART1
+    { SERIAL_PORT_PIOUART1, IO_TAG(PIOUART1_RX_PIN), IO_TAG(PIOUART1_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART2
+    { SERIAL_PORT_PIOUART2, IO_TAG(PIOUART2_RX_PIN), IO_TAG(PIOUART2_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART3
+    { SERIAL_PORT_PIOUART3, IO_TAG(PIOUART3_RX_PIN), IO_TAG(PIOUART3_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART4
+    { SERIAL_PORT_PIOUART4, IO_TAG(PIOUART4_RX_PIN), IO_TAG(PIOUART4_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART5
+    { SERIAL_PORT_PIOUART5, IO_TAG(PIOUART5_RX_PIN), IO_TAG(PIOUART5_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART6
+    { SERIAL_PORT_PIOUART6, IO_TAG(PIOUART6_RX_PIN), IO_TAG(PIOUART6_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART7
+    { SERIAL_PORT_PIOUART7, IO_TAG(PIOUART7_RX_PIN), IO_TAG(PIOUART7_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART8
+    { SERIAL_PORT_PIOUART8, IO_TAG(PIOUART8_RX_PIN), IO_TAG(PIOUART8_TX_PIN), IO_TAG(NONE) },
+#endif
+#ifdef USE_PIOUART9
+    { SERIAL_PORT_PIOUART9, IO_TAG(PIOUART9_RX_PIN), IO_TAG(PIOUART9_TX_PIN), IO_TAG(NONE) },
+#endif
 };
 
 PG_REGISTER_WITH_RESET_FN(serialPinConfig_t, serialPinConfig, PG_SERIAL_PIN_CONFIG, 0);
 
 void pgResetFn_serialPinConfig(serialPinConfig_t *serialPinConfig)
 {
-    for (size_t index = 0 ; index < ARRAYLEN(serialDefaultPin) ; index++) {
-        const serialDefaultPin_t *defpin = &serialDefaultPin[index];
-        serialPinConfig->ioTagRx[SERIAL_PORT_IDENTIFIER_TO_INDEX(defpin->ident)] = defpin->rxIO;
-        serialPinConfig->ioTagTx[SERIAL_PORT_IDENTIFIER_TO_INDEX(defpin->ident)] = defpin->txIO;
-        serialPinConfig->ioTagInverter[SERIAL_PORT_IDENTIFIER_TO_INDEX(defpin->ident)] = defpin->inverterIO;
+    for (const serialDefaultPin_t *defpin = serialDefaultPin; defpin < ARRAYEND(serialDefaultPin); defpin++) {
+        const int resourceIndex = serialResourceIndex(defpin->ident);
+        if (resourceIndex >= 0) {
+            serialPinConfig->ioTagRx[resourceIndex] = defpin->rxIO;
+            serialPinConfig->ioTagTx[resourceIndex] = defpin->txIO;
+#if defined(USE_INVERTER)
+            // LPUART/SOFTSERIAL do not need/support inverter
+            if (resourceIndex < (int)ARRAYLEN(serialPinConfig->ioTagInverter)) {
+                serialPinConfig->ioTagInverter[resourceIndex] = defpin->inverterIO;
+            }
+#endif
+        }
     }
 }
-#endif
+
 #endif

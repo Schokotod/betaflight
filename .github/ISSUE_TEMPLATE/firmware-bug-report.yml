@@ -29,19 +29,25 @@ body:
     validations:
       required: true
 
+  - type: markdown
+    attributes:
+      value: |
+        # Flight controller configuration
+
   - type: textarea
     attributes:
-      label: Flight controller configuration
+      label: Support ID
       description: |
-        Create a `diff` and post it here in a code block. Put (three backticks) at the start and end of the diff block (instructions  on how to do a diff: https://oscarliang.com/use-diff-not-dump-betaflight/).
-        Use `resource show all` to create a resource allocation list and post it here in a code block. Put (three backticks) at the start and end of the output block.
-      value: |
-        ```
-          # REPLACE THIS LINE BY THE OUTPUT OF YOUR `diff`
-        ```
-        ```
-          # REPLACE THIS LINE BY THE OUTPUT OF YOUR `resource show all`
-        ```
+
+        If missing any drivers for GYRO, ACC, MAG, BARO, FLASH or OSD it's required to flash a `Core Only` build for your board.
+
+        Go to CLI tab and use the `Submit Support Data` button to get an `Support ID`. Please post the `Support ID` here.
+
+        Don't add three backticks or any other format symbol at the start or end of the block, they will be added automatically.
+
+      placeholder: |
+          # PASTE HERE THE OUTPUT OF `Support ID` IN THE CLI TAB
+      render: txt
     validations:
       required: true
 
@@ -64,7 +70,7 @@ body:
 
   - type: textarea
     attributes:
-      label: How are the different components wired up
+      label: How are the different components wired up (including port information)
       description: Details about how all is wired.
 
   - type: markdown

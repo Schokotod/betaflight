@@ -42,7 +42,7 @@
 #include "io/serial_4way_impl.h"
 #include "io/serial_4way_avrootloader.h"
 
-#if defined(USE_SERIAL_4WAY_BLHELI_BOOTLOADER) && !defined(USE_FAKE_ESC)
+#if defined(USE_SERIAL_4WAY_BLHELI_BOOTLOADER) && !defined(USE_VIRTUAL_ESC)
 
 // Bootloader commands
 // RunCmd
@@ -110,7 +110,7 @@ static uint8_t suart_getc_(uint8_t *bt)
     return 1;
 }
 
-static void suart_putc_(uint8_t *tx_b)
+static void suart_putc_(const uint8_t *tx_b)
 {
     // shift out stopbit first
     uint16_t bitmask = (*tx_b << 2) | 1 | (1 << 10);
@@ -132,7 +132,7 @@ static void suart_putc_(uint8_t *tx_b)
 static uint8_16_u CRC_16;
 static uint8_16_u LastCRC_16;
 
-static void ByteCrc(uint8_t *bt)
+static void ByteCrc(const uint8_t *bt)
 {
     uint8_t xb = *bt;
     for (uint8_t i = 0; i < 8; i++)
@@ -201,7 +201,7 @@ uint8_t BL_ConnectEx(uint8_32_u *pDeviceInfo)
 
     //DeviceInfo.dword=0; is set before
     uint8_t BootInfo[9];
-    uint8_t BootMsg[BootMsgLen-1] = "471";
+    uint8_t BootMsg[BootMsgLen-1] = {'4', '7', '1'};
     // x * 0 + 9
 #if defined(USE_SERIAL_4WAY_SK_BOOTLOADER)
     uint8_t BootInit[] = {0,0,0,0,0,0,0,0,0,0,0,0,0x0D,'B','L','H','e','l','i',0xF4,0x7D};
@@ -344,12 +344,12 @@ uint8_t BL_VerifyFlash(ioMem_t *pMem)
 }
 
 #endif
-#if defined(USE_SERIAL_4WAY_BLHELI_BOOTLOADER) && defined(USE_FAKE_ESC)
+#if defined(USE_SERIAL_4WAY_BLHELI_BOOTLOADER) && defined(USE_VIRTUAL_ESC)
 
-#define FAKE_PAGE_SIZE 512
-#define FAKE_FLASH_SIZE 16385
+#define VIRTUAL_PAGE_SIZE 512
+#define VIRTUAL_FLASH_SIZE 16385
 
-static uint8_t fakeFlash[FAKE_FLASH_SIZE] =
+static uint8_t virtualFlash[VIRTUAL_FLASH_SIZE] =
 {
     0x02, 0x19, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0xAA, 0xFF, 0xFF,
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -858,7 +858,7 @@ static uint8_t BL_ReadA(uint8_t cmd, ioMem_t *pMem)
     uint16_t bytes = pMem->D_NUM_BYTES;
     if (bytes == 0) bytes = 256;
 
-    memcpy(pMem->D_PTR_I, &fakeFlash[address], bytes);
+    memcpy(pMem->D_PTR_I, &virtualFlash[address], bytes);
     return true;
 }
 
@@ -870,7 +870,7 @@ static uint8_t BL_WriteA(uint8_t cmd, ioMem_t *pMem, uint32_t timeout)
 
     uint16_t bytes = pMem->D_NUM_BYTES;
     if (bytes == 0) bytes = 256;
-    memcpy(&fakeFlash[address], pMem->D_PTR_I, bytes);
+    memcpy(&virtualFlash[address], pMem->D_PTR_I, bytes);
     return true;
 }
 
@@ -888,9 +888,9 @@ uint8_t BL_ReadEEprom(ioMem_t *pMem)
 uint8_t BL_PageErase(ioMem_t *pMem)
 {
     uint16_t address = pMem->D_FLASH_ADDR_H << 8 | pMem->D_FLASH_ADDR_L;
-    if (address + FAKE_PAGE_SIZE > FAKE_FLASH_SIZE)
+    if (address + VIRTUAL_PAGE_SIZE > VIRTUAL_FLASH_SIZE)
         return false;
-    memset(&fakeFlash[address], 0xFF, FAKE_PAGE_SIZE);
+    memset(&virtualFlash[address], 0xFF, VIRTUAL_PAGE_SIZE);
     return true;
 }
 

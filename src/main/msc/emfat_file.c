@@ -31,7 +31,7 @@
 #include "common/time.h"
 #include "common/utils.h"
 
-#include "drivers/flash.h"
+#include "drivers/flash/flash.h"
 #include "drivers/light_led.h"
 #include "drivers/time.h"
 #include "drivers/usb_msc.h"
@@ -227,7 +227,7 @@ static const char icon_file[] =
 #define CMA_TIME EMFAT_ENCODE_CMA_TIME(1,1,2018, 13,0,0)
 #define CMA { CMA_TIME, CMA_TIME, CMA_TIME }
 
-#if defined (USE_EMFAT_AUTORUN) || defined (USE_EMFAT_ICON) || defined (USE_EMFAT_README)
+#if defined(USE_EMFAT_AUTORUN) || defined(USE_EMFAT_ICON) || defined(USE_EMFAT_README)
 static void memory_read_proc(uint8_t *dest, int size, uint32_t offset, emfat_entry_t *entry)
 {
     int len;
@@ -293,7 +293,7 @@ static void emfat_set_entry_cma(emfat_entry_t *entry)
 #ifdef USE_FLASHFS
 static void emfat_add_log(emfat_entry_t *entry, int number, uint32_t offset, uint32_t size)
 {
-    static char logNames[EMFAT_MAX_LOG_ENTRY][8+1+3];
+    static char logNames[EMFAT_MAX_LOG_ENTRY][8+1+3+1]; // 8.3 name plus terminator
 
     tfp_sprintf(logNames[number], FC_FIRMWARE_IDENTIFIER "_%03d.BBL", number + 1);
     entry->name = logNames[number];

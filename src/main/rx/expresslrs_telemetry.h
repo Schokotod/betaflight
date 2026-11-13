@@ -23,7 +23,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define ELRS_TELEMETRY_SHIFT 2
+#ifndef USE_ELRSV4
+    #define ELRS_TELEMETRY_SHIFT 2
+#else
+    #define ELRS_TELEMETRY_SHIFT 1
+#endif
 #define ELRS_TELEMETRY_BYTES_PER_CALL 5
 #define ELRS_TELEMETRY_MAX_PACKAGES (255 >> ELRS_TELEMETRY_SHIFT)
 #define ELRS_TELEMETRY_MAX_MISSED_PACKETS 20
@@ -36,6 +40,7 @@
 
 typedef enum {
     ELRS_SENDER_IDLE = 0,
+    ELRS_SEND_PENDING,
     ELRS_SENDING,
     ELRS_WAIT_UNTIL_NEXT_CONFIRM,
     ELRS_RESYNC,
@@ -45,16 +50,16 @@ typedef enum {
 void initTelemetry(void);
 bool getNextTelemetryPayload(uint8_t *nextPayloadSize, uint8_t **payloadData);
 
-void setTelemetryDataToTransmit(const uint8_t lengthToTransmit, uint8_t* dataToTransmit, const uint8_t bpc);
+void setTelemetryDataToTransmit(const uint8_t lengthToTransmit, uint8_t* dataToTransmit);
 bool isTelemetrySenderActive(void);
-void getCurrentTelemetryPayload(uint8_t *packageIndex, uint8_t *count, uint8_t **currentData);
+uint8_t getCurrentTelemetryPayload(uint8_t *outData, uint8_t maxLen);
 void confirmCurrentTelemetryPayload(const bool telemetryConfirmValue);
 void updateTelemetryRate(const uint16_t airRate, const uint8_t tlmRatio, const uint8_t tlmBurst);
 
 void mspReceiverResetState(void);
 bool getCurrentMspConfirm(void);
-void setMspDataToReceive(const uint8_t maxLength, uint8_t* dataToReceive, const uint8_t bpc);
-void receiveMspData(const uint8_t packageIndex, const volatile uint8_t* receiveData);
+void setMspDataToReceive(const uint8_t maxLength, uint8_t* dataToReceive);
+void receiveMspData(const uint8_t packageIndex, const volatile uint8_t* const receiveData);
 bool hasFinishedMspData(void);
 void mspReceiverUnlock(void);
 void processMspPacket(uint8_t *packet);

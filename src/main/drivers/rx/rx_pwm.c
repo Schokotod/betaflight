@@ -23,7 +23,7 @@
 
 #include "platform.h"
 
-#if defined(USE_PWM) || defined(USE_PPM)
+#if defined(USE_RX_PWM) || defined(USE_RX_PPM)
 
 #include "build/build_config.h"
 #include "build/debug.h"
@@ -34,6 +34,7 @@
 #include "drivers/nvic.h"
 #include "drivers/pwm_output.h"
 #include "drivers/timer.h"
+#include "drivers/timer_impl.h"
 
 #include "pg/rx_pwm.h"
 
@@ -54,7 +55,7 @@
 
 static inputFilteringMode_e inputFilteringMode;
 
-void pwmICConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t polarity);
+void pwmICConfig(timerResource_t *tim, uint8_t channel, uint16_t polarity, uint8_t filter);
 
 typedef enum {
     INPUT_MODE_PPM,
@@ -73,7 +74,7 @@ typedef struct {
     captureCompare_t capture;
 
     const timerHardware_t *timerHardware;
-    timerCCHandlerRec_t edgeCb;
+    timerEdgeHandlerRec_t edgeCb;
     timerOvrHandlerRec_t overflowCb;
 } pwmInputPort_t;
 
@@ -125,11 +126,14 @@ void resetPPMDataReceivedState(void)
 
 #define MIN_CHANNELS_BEFORE_PPM_FRAME_CONSIDERED_VALID 4
 
-#ifdef DEBUG_PPM_ISR
 typedef enum {
     SOURCE_OVERFLOW = 0,
     SOURCE_EDGE = 1
 } eventSource_e;
+
+static void ppmISREvent(eventSource_e source, uint32_t capture);
+
+#ifdef DEBUG_PPM_ISR
 
 typedef struct ppmISREvent_s {
     uint32_t capture;
@@ -139,15 +143,15 @@ typedef struct ppmISREvent_s {
 static ppmISREvent_t ppmEvents[20];
 static uint8_t ppmEventIndex = 0;
 
-void ppmISREvent(eventSource_e source, uint32_t capture)
+static void ppmISREvent(eventSource_e source, uint32_t capture)
 {
-    ppmEventIndex = (ppmEventIndex + 1) % (sizeof(ppmEvents) / sizeof(ppmEvents[0]));
+    ppmEventIndex = (ppmEventIndex + 1) % ARRAYLEN(ppmEvents);
 
     ppmEvents[ppmEventIndex].source = source;
     ppmEvents[ppmEventIndex].capture = capture;
 }
 #else
-void ppmISREvent(eventSource_e source, uint32_t capture) {}
+static void ppmISREvent(eventSource_e source, uint32_t capture) {}
 #endif
 
 static void ppmResetDevice(void)
@@ -175,7 +179,7 @@ static void ppmOverflowCallback(timerOvrHandlerRec_t* cbRec, captureCompare_t ca
     }
 }
 
-static void ppmEdgeCallback(timerCCHandlerRec_t* cbRec, captureCompare_t capture)
+static void ppmEdgeCallback(timerEdgeHandlerRec_t* cbRec, captureCompare_t capture)
 {
     UNUSED(cbRec);
     ppmISREvent(SOURCE_EDGE, capture);
@@ -208,7 +212,6 @@ static void ppmEdgeCallback(timerCCHandlerRec_t* cbRec, captureCompare_t capture
     }
 
     ppmDev.overflowed = false;
-
 
     /* Store the current measurement */
     ppmDev.currentTime = currentTime;
@@ -289,19 +292,16 @@ static void pwmOverflowCallback(timerOvrHandlerRec_t* cbRec, captureCompare_t ca
     }
 }
 
-static void pwmEdgeCallback(timerCCHandlerRec_t *cbRec, captureCompare_t capture)
+static void pwmEdgeCallback(timerEdgeHandlerRec_t *cbRec, captureCompare_t capture)
 {
     pwmInputPort_t *pwmInputPort = container_of(cbRec, pwmInputPort_t, edgeCb);
     const timerHardware_t *timerHardwarePtr = pwmInputPort->timerHardware;
+    const uint8_t filter = (inputFilteringMode == INPUT_FILTERING_ENABLED) ? INPUT_FILTER_TO_HELP_WITH_NOISE_FROM_OPENLRS_TELEMETRY_RX : 0;
 
     if (pwmInputPort->state == 0) {
         pwmInputPort->rise = capture;
         pwmInputPort->state = 1;
-#if defined(USE_HAL_DRIVER)
-        pwmICConfig(timerHardwarePtr->tim, timerHardwarePtr->channel, TIM_ICPOLARITY_FALLING);
-#else
-        pwmICConfig(timerHardwarePtr->tim, timerHardwarePtr->channel, TIM_ICPolarity_Falling);
-#endif
+        pwmICConfig(timerHardwarePtr->tim, timerHardwarePtr->channel, TIMER_POLARITY_FALLING, filter);
     } else {
         pwmInputPort->fall = capture;
 
@@ -311,57 +311,11 @@ static void pwmEdgeCallback(timerCCHandlerRec_t *cbRec, captureCompare_t capture
 
         // switch state
         pwmInputPort->state = 0;
-#if defined(USE_HAL_DRIVER)
-        pwmICConfig(timerHardwarePtr->tim, timerHardwarePtr->channel, TIM_ICPOLARITY_RISING);
-#else
-        pwmICConfig(timerHardwarePtr->tim, timerHardwarePtr->channel, TIM_ICPolarity_Rising);
-#endif
+        pwmICConfig(timerHardwarePtr->tim, timerHardwarePtr->channel, TIMER_POLARITY_RISING, filter);
         pwmInputPort->missedEvents = 0;
     }
 }
 
-#ifdef USE_HAL_DRIVER
-
-void pwmICConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t polarity)
-{
-    TIM_HandleTypeDef* Handle = timerFindTimerHandle(tim);
-    if (Handle == NULL) return;
-
-    TIM_IC_InitTypeDef TIM_ICInitStructure;
-
-    TIM_ICInitStructure.ICPolarity = polarity;
-    TIM_ICInitStructure.ICSelection = TIM_ICSELECTION_DIRECTTI;
-    TIM_ICInitStructure.ICPrescaler = TIM_ICPSC_DIV1;
-
-    if (inputFilteringMode == INPUT_FILTERING_ENABLED) {
-        TIM_ICInitStructure.ICFilter = INPUT_FILTER_TO_HELP_WITH_NOISE_FROM_OPENLRS_TELEMETRY_RX;
-    } else {
-        TIM_ICInitStructure.ICFilter = 0x00;
-    }
-
-    HAL_TIM_IC_ConfigChannel(Handle, &TIM_ICInitStructure, channel);
-    HAL_TIM_IC_Start_IT(Handle,channel);
-}
-#else
-void pwmICConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t polarity)
-{
-    TIM_ICInitTypeDef TIM_ICInitStructure;
-
-    TIM_ICStructInit(&TIM_ICInitStructure);
-    TIM_ICInitStructure.TIM_Channel = channel;
-    TIM_ICInitStructure.TIM_ICPolarity = polarity;
-    TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
-    TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
-
-    if (inputFilteringMode == INPUT_FILTERING_ENABLED) {
-        TIM_ICInitStructure.TIM_ICFilter = INPUT_FILTER_TO_HELP_WITH_NOISE_FROM_OPENLRS_TELEMETRY_RX;
-    } else {
-        TIM_ICInitStructure.TIM_ICFilter = 0x00;
-    }
-
-    TIM_ICInit(tim, &TIM_ICInitStructure);
-}
-#endif
 
 void pwmRxInit(const pwmConfig_t *pwmConfig)
 {
@@ -386,21 +340,14 @@ void pwmRxInit(const pwmConfig_t *pwmConfig)
 
         IO_t io = IOGetByTag(pwmConfig->ioTags[channel]);
         IOInit(io, OWNER_PWMINPUT, RESOURCE_INDEX(channel));
-#ifdef STM32F1
-        IOConfigGPIO(io, IOCFG_IPD);
-#else
         IOConfigGPIOAF(io, IOCFG_AF_PP, timer->alternateFunction);
-#endif
         timerConfigure(timer, (uint16_t)PWM_TIMER_PERIOD, PWM_TIMER_1MHZ);
-        timerChCCHandlerInit(&port->edgeCb, pwmEdgeCallback);
-        timerChOvrHandlerInit(&port->overflowCb, pwmOverflowCallback);
-        timerChConfigCallbacks(timer, &port->edgeCb, &port->overflowCb);
+        timerChannelEdgeHandlerInit(&port->edgeCb, pwmEdgeCallback);
+        timerChannelOverflowHandlerInit(&port->overflowCb, pwmOverflowCallback);
+        timerChannelConfigCallbacks(timer, &port->edgeCb, &port->overflowCb);
 
-#if defined(USE_HAL_DRIVER)
-        pwmICConfig(timer->tim, timer->channel, TIM_ICPOLARITY_RISING);
-#else
-        pwmICConfig(timer->tim, timer->channel, TIM_ICPolarity_Rising);
-#endif
+        const uint8_t filter = (inputFilteringMode == INPUT_FILTERING_ENABLED) ? INPUT_FILTER_TO_HELP_WITH_NOISE_FROM_OPENLRS_TELEMETRY_RX : 0;
+        pwmICConfig(timer->tim, timer->channel, TIMER_POLARITY_RISING, filter);
 
     }
 }
@@ -408,15 +355,15 @@ void pwmRxInit(const pwmConfig_t *pwmConfig)
 #define FIRST_PWM_PORT 0
 
 #ifdef USE_PWM_OUTPUT
-void ppmAvoidPWMTimerClash(TIM_TypeDef *pwmTimer)
+static void ppmAvoidPWMTimerClash(const timerHardware_t *timHw)
 {
     pwmOutputPort_t *motors = pwmGetMotors();
     for (int motorIndex = 0; motorIndex < MAX_SUPPORTED_MOTORS; motorIndex++) {
-        if (!motors[motorIndex].enabled || motors[motorIndex].channel.tim != pwmTimer) {
+        if (!motors[motorIndex].enabled || motors[motorIndex].channel.tim != timHw->tim) {
             continue;
         }
 
-        ppmCountDivisor = timerClock(pwmTimer) / (pwmTimer->PSC + 1);
+        ppmCountDivisor = timerClock(timHw) / (timerGetPrescaler(timHw) + 1);
         return;
     }
 }
@@ -435,7 +382,7 @@ void ppmRxInit(const ppmConfig_t *ppmConfig)
     }
 
 #ifdef USE_PWM_OUTPUT
-    ppmAvoidPWMTimerClash(timer->tim);
+    ppmAvoidPWMTimerClash(timer);
 #endif
 
     port->mode = INPUT_MODE_PPM;
@@ -443,22 +390,15 @@ void ppmRxInit(const ppmConfig_t *ppmConfig)
 
     IO_t io = IOGetByTag(ppmConfig->ioTag);
     IOInit(io, OWNER_PPMINPUT, 0);
-#ifdef STM32F1
-    IOConfigGPIO(io, IOCFG_IPD);
-#else
     IOConfigGPIOAF(io, IOCFG_AF_PP, timer->alternateFunction);
-#endif
 
     timerConfigure(timer, (uint16_t)PPM_TIMER_PERIOD, PWM_TIMER_1MHZ);
-    timerChCCHandlerInit(&port->edgeCb, ppmEdgeCallback);
-    timerChOvrHandlerInit(&port->overflowCb, ppmOverflowCallback);
-    timerChConfigCallbacks(timer, &port->edgeCb, &port->overflowCb);
+    timerChannelEdgeHandlerInit(&port->edgeCb, ppmEdgeCallback);
+    timerChannelOverflowHandlerInit(&port->overflowCb, ppmOverflowCallback);
+    timerChannelConfigCallbacks(timer, &port->edgeCb, &port->overflowCb);
 
-#if defined(USE_HAL_DRIVER)
-    pwmICConfig(timer->tim, timer->channel, TIM_ICPOLARITY_RISING);
-#else
-    pwmICConfig(timer->tim, timer->channel, TIM_ICPolarity_Rising);
-#endif
+    const uint8_t filter = (inputFilteringMode == INPUT_FILTERING_ENABLED) ? INPUT_FILTER_TO_HELP_WITH_NOISE_FROM_OPENLRS_TELEMETRY_RX : 0;
+    pwmICConfig(timer->tim, timer->channel, TIMER_POLARITY_RISING, filter);
 }
 
 uint16_t ppmRead(uint8_t channel)

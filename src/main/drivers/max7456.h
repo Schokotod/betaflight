@@ -27,8 +27,6 @@
 /** PAL or NTSC, value is number of chars total */
 #define VIDEO_BUFFER_CHARS_NTSC   390
 #define VIDEO_BUFFER_CHARS_PAL    480
-#define VIDEO_LINES_NTSC          13
-#define VIDEO_LINES_PAL           16
 
 typedef enum {
     // IO defined and MAX7456 was detected
@@ -45,7 +43,7 @@ extern uint16_t maxScreenSize;
 struct vcdProfile_s;
 void    max7456HardwareReset(void);
 struct max7456Config_s;
-void    max7456PreInit(const struct max7456Config_s *max7456Config);
+void    max7456Preinit(const struct max7456Config_s *max7456Config);
 max7456InitStatus_e max7456Init(const struct max7456Config_s *max7456Config, const struct vcdProfile_s *vcdProfile, bool cpuOverclock);
 void    max7456Invert(bool invert);
 void    max7456Brightness(uint8_t black, uint8_t white);
@@ -53,7 +51,7 @@ bool    max7456ReInitIfRequired(bool forceStallCheck);
 bool     max7456DrawScreen(void);
 bool    max7456WriteNvm(uint8_t char_address, const uint8_t *font_data);
 uint8_t max7456GetRowsCount(void);
-void    max7456Write(uint8_t x, uint8_t y, const char *buff);
+void    max7456Write(uint8_t x, uint8_t y, const char *text);
 void    max7456WriteChar(uint8_t x, uint8_t y, uint8_t c);
 void    max7456ClearScreen(void);
 void    max7456RefreshAll(void);

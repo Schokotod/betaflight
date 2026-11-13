@@ -35,7 +35,6 @@
 #define TRANSPONDER_TRANSMIT_JITTER_ARCITIMER 10000
 /*** ******** ***/
 
-
 /*** ILAP ***/
 #define TRANSPONDER_BITS_PER_BYTE_ILAP 10 // start + 8 data + stop
 #define TRANSPONDER_DATA_LENGTH_ILAP 6
@@ -48,7 +47,6 @@
 #define TRANSPONDER_TRANSMIT_DELAY_ILAP   4500
 #define TRANSPONDER_TRANSMIT_JITTER_ILAP  10000
 /*** ******** ***/
-
 
 /*** ERLT ***/
 #define TRANSPONDER_DATA_LENGTH_ERLT        1
@@ -63,31 +61,17 @@
 #define TRANSPONDER_TRANSMIT_JITTER_ERLT    5000
 /*** ******** ***/
 
-
 /*
  * Implementation note:
  * Using around over 700 bytes for a transponder DMA buffer is a little excessive, likely an alternative implementation that uses a fast
  * ISR to generate the output signal dynamically based on state would be more memory efficient and would likely be more appropriate for
  * other targets.  However this approach requires very little CPU time and is just fire-and-forget.
- *
- * On an STM32F303CC 720 bytes is currently fine and that is the target for which this code was designed for.
  */
-#if defined(STM32F3) || defined(UNIT_TEST)
-
-    typedef union transponderIrDMABuffer_s {
-        uint8_t arcitimer[TRANSPONDER_DMA_BUFFER_SIZE_ARCITIMER]; // 620
-        uint8_t ilap[TRANSPONDER_DMA_BUFFER_SIZE_ILAP]; // 720
-        uint8_t erlt[TRANSPONDER_DMA_BUFFER_SIZE_ERLT]; // 91-200
-    } transponderIrDMABuffer_t;
-
-#elif defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4)
-
-    typedef union transponderIrDMABuffer_s {
-        uint32_t arcitimer[TRANSPONDER_DMA_BUFFER_SIZE_ARCITIMER]; // 620
-        uint32_t ilap[TRANSPONDER_DMA_BUFFER_SIZE_ILAP]; // 720
-        uint32_t erlt[TRANSPONDER_DMA_BUFFER_SIZE_ERLT]; // 91-200
-    } transponderIrDMABuffer_t;
-#endif
+typedef union transponderIrDMABuffer_s {
+    uint32_t arcitimer[TRANSPONDER_DMA_BUFFER_SIZE_ARCITIMER];
+    uint32_t ilap[TRANSPONDER_DMA_BUFFER_SIZE_ILAP];
+    uint32_t erlt[TRANSPONDER_DMA_BUFFER_SIZE_ERLT];
+} transponderIrDMABuffer_t;
 
 typedef struct transponder_s {
     uint8_t gap_toggles;
@@ -96,9 +80,7 @@ typedef struct transponder_s {
     uint16_t bitToggleOne;
     uint32_t dma_buffer_size;
 
-    #if defined(STM32F3) || defined(STM32F4)|| defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(UNIT_TEST)
-        transponderIrDMABuffer_t transponderIrDMABuffer;
-    #endif
+    transponderIrDMABuffer_t transponderIrDMABuffer;
 
     const struct transponderVTable *vTable;
 } transponder_t;
@@ -119,7 +101,7 @@ struct transponderVTable {
 bool transponderIrInit(const ioTag_t ioTag, const transponderProvider_e provider);
 void transponderIrDisable(void);
 
-void transponderIrHardwareInit(ioTag_t ioTag, transponder_t *transponder);
+bool transponderIrHardwareInit(ioTag_t ioTag, transponder_t *transponder);
 void transponderIrDMAEnable(transponder_t *transponder);
 
 void transponderIrWaitForTransmitComplete(void);
@@ -127,6 +109,6 @@ void transponderIrWaitForTransmitComplete(void);
 void transponderIrUpdateData(const uint8_t* transponderData);
 void transponderIrTransmit(void);
 
-bool isTransponderIrReady(void);
+bool transponderIrIsReady(void);
 
 extern volatile uint8_t transponderIrDataTransferInProgress;

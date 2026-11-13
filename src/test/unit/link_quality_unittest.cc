@@ -32,6 +32,7 @@ extern "C" {
     #include "common/streambuf.h"
     #include "common/time.h"
     #include "common/utils.h"
+    #include "common/vector.h"
 
     #include "config/config.h"
 
@@ -60,6 +61,7 @@ extern "C" {
 
     #include "pg/pg.h"
     #include "pg/pg_ids.h"
+    #include "pg/pilot.h"
     #include "pg/rx.h"
 
     #include "rx/rx.h"
@@ -67,10 +69,10 @@ extern "C" {
     #include "sensors/battery.h"
 
     attitudeEulerAngles_t attitude;
-    float rMat[3][3];
+    matrix33_t rMat;
 
     pidProfile_t *currentPidProfile;
-    float rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
+    extern float rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
     uint8_t GPS_numSat;
     uint16_t GPS_distanceToHome;
     int16_t GPS_directionToHome;
@@ -79,9 +81,10 @@ extern "C" {
     gpsSolutionData_t gpsSol;
     float motor[8];
     acc_t acc;
-    float accAverage[XYZ_AXIS_COUNT];
 
     PG_REGISTER(batteryConfig_t, batteryConfig, PG_BATTERY_CONFIG, 0);
+    PG_REGISTER_ARRAY(batteryProfile_t, BATTERY_PROFILE_COUNT, batteryProfiles, PG_BATTERY_PROFILES, 0);
+    const batteryProfile_t *currentBatteryProfile;
     PG_REGISTER(blackboxConfig_t, blackboxConfig, PG_BLACKBOX_CONFIG, 0);
     PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 0);
     PG_REGISTER(pilotConfig_t, pilotConfig, PG_PILOT_CONFIG, 0);
@@ -105,13 +108,13 @@ extern "C" {
 extern "C" {
     PG_REGISTER(flight3DConfig_t, flight3DConfig, PG_MOTOR_3D_CONFIG, 0);
 
-    boxBitmask_t rcModeActivationMask;
+    extern boxBitmask_t rcModeActivationMask;
     int16_t debug[DEBUG16_VALUE_COUNT];
     uint8_t debugMode = 0;
 
     uint16_t updateLinkQualitySamples(uint16_t value);
 
-    extern uint16_t applyRxChannelRangeConfiguraton(int sample, const rxChannelRangeConfig_t *range);
+    extern uint16_t applyRxChannelRangeConfiguraton(int sample, const scaleRangef_t *range);
 }
 void setDefaultSimulationState()
 {
@@ -138,7 +141,7 @@ void doTestArm(bool testEmpty = true)
 
     // then
     // arming alert displayed
-    displayPortTestBufferSubstring(12, 7, "ARMED");
+    displayPortTestBufferSubstring(13, 8, "ARMED");
 
     // given
     // armed alert times out (0.5 seconds)
@@ -164,7 +167,8 @@ void doTestArm(bool testEmpty = true)
 /*
  * Auxiliary function. Test is there're stats that must be shown
  */
-bool isSomeStatEnabled(void) {
+bool isSomeStatEnabled(void)
+{
     return (osdConfigMutable()->enabled_stats != 0);
 }
 
@@ -207,8 +211,9 @@ TEST(LQTest, TestInit)
 
     // and
     // this battery configuration (used for battery voltage elements)
-    batteryConfigMutable()->vbatmincellvoltage = 330;
-    batteryConfigMutable()->vbatmaxcellvoltage = 430;
+    batteryProfilesMutable(0)->vbatmincellvoltage = 330;
+    batteryProfilesMutable(0)->vbatmaxcellvoltage = 430;
+    currentBatteryProfile = batteryProfiles(0);
 
     // when
     // OSD is initialised
@@ -221,9 +226,9 @@ TEST(LQTest, TestInit)
 
     // then
     // display buffer should contain splash screen
-    displayPortTestBufferSubstring(7, 8, "MENU:THR MID");
-    displayPortTestBufferSubstring(11, 9, "+ YAW LEFT");
-    displayPortTestBufferSubstring(11, 10, "+ PITCH UP");
+    displayPortTestBufferSubstring(7, 10, "MENU:THR MID");
+    displayPortTestBufferSubstring(11, 11, "+ YAW LEFT");
+    displayPortTestBufferSubstring(11, 12, "+ PITCH UP");
 
     // when
     // splash screen timeout has elapsed
@@ -339,9 +344,9 @@ TEST(LQTest, TestElementLQ_PROTOCOL_CRSF_VALUES)
         simulationTime += 10;
     }
 
-    // crsf setLinkQualityDirect 0-300;
+    // CRSF link quality ranges from 0-100.
 
-    for (uint8_t x = 0; x <= 99; x++) {
+    for (uint8_t x = 0; x <= 100; x++) {
         for (uint8_t m = 0; m <= 4; m++) {
             // when x scaled
             setLinkQualityDirect(x);
@@ -356,6 +361,18 @@ TEST(LQTest, TestElementLQ_PROTOCOL_CRSF_VALUES)
             displayPortTestBufferSubstring(8, 1, "%c%1d:%2d", SYM_LINK_QUALITY, m, x);
         }
     }
+
+    osdElementConfigMutable()->item_pos[OSD_LINK_QUALITY] =
+        OSD_POS(8, 1) | OSD_PROFILE_1_FLAG | (OSD_ELEMENT_TYPE_2 << 14);
+    osdAnalyzeActiveElements();
+    setLinkQualityDirect(100);
+    rxSetRfMode(4);
+    simulationTime += 100000;
+    while (osdUpdateCheck(simulationTime, 0)) {
+        osdUpdate(simulationTime);
+        simulationTime += 10;
+    }
+    displayPortTestBufferSubstring(8, 1, "%c%2d", SYM_LINK_QUALITY, 100);
 }
 /*
  * Tests the LQ Alarms
@@ -426,7 +443,7 @@ TEST(LQTest, TestLQAlarm)
     // elements showing values in alarm range should flash
     simulationTime += 1000000;
     simulationTime -= simulationTime % 1000000;
-    startTime = simulationTime;
+    startTime = simulationTime + 0.25e6;
     for (int i = 0; i < 15; i++) {
         // Blinking should happen at 2Hz
         simulationTime = startTime + i*0.25e6;
@@ -438,6 +455,7 @@ TEST(LQTest, TestLQAlarm)
 #ifdef DEBUG_OSD
         displayPortTestPrint();
 #endif
+
         if (i % 2 == 0) {
             displayPortTestBufferSubstring(8,  1, "%c5", SYM_LINK_QUALITY);
         } else {
@@ -474,23 +492,26 @@ extern "C" {
     bool isBeeperOn() { return false; }
     uint8_t getCurrentPidProfileIndex() { return 0; }
     uint8_t getCurrentControlRateProfileIndex() { return 0; }
+    uint8_t getCurrentBatteryProfileIndex() { return 0; }
     batteryState_e getBatteryState() { return BATTERY_OK; }
     uint8_t getBatteryCellCount() { return 4; }
     uint16_t getBatteryVoltage() { return 1680; }
     uint16_t getBatteryAverageCellVoltage() { return  420; }
+    uint8_t calculateBatteryPercentageRemaining(void) { return  0; }
     int32_t getAmperage() { return 0; }
     int32_t getMAhDrawn() { return 0; }
+    float getWhDrawn() { return 0.0; }
     int32_t getEstimatedAltitudeCm() { return 0; }
+    int32_t getAltitudeAsl() { return 0; }
     int32_t getEstimatedVario() { return 0; }
     int32_t blackboxGetLogNumber() { return 0; }
     bool isBlackboxDeviceWorking() { return true; }
     bool isBlackboxDeviceFull() { return false; }
     serialPort_t *openSerialPort(serialPortIdentifier_e, serialPortFunction_e, serialReceiveCallbackPtr, void *, uint32_t, portMode_e, portOptions_e) {return NULL;}
-    const serialPortConfig_t *findSerialPortConfig(serialPortFunction_e ) {return NULL;}
-    bool telemetryCheckRxPortShared(const serialPortConfig_t *) {return false;}
+    bool telemetryCheckRxPortShared(serialPortIdentifier_e, SerialRXType) {return false;}
     bool cmsDisplayPortRegister(displayPort_t *) { return false; }
     uint16_t getCoreTemperatureCelsius(void) { return 0; }
-    bool isFlipOverAfterCrashActive(void) { return false; }
+    bool isCrashFlipModeActive(void) { return false; }
     float pidItermAccelerator(void) { return 1.0; }
     uint8_t getMotorCount(void){ return 4; }
     bool areMotorsRunning(void){ return true; }
@@ -513,7 +534,7 @@ extern "C" {
     void failsafeOnValidDataReceived(void) { }
     void failsafeOnValidDataFailed(void) { }
     void pinioBoxTaskControl(void) { }
-    bool taskUpdateRxMainInProgress() { return true; }
+    bool taskUpdateRxMainInProgress(void) { return true; }
     void schedulerIgnoreTaskStateTime(void) { }
     void schedulerIgnoreTaskExecRate(void) { }
     bool schedulerGetIgnoreTaskExecTime() { return false; }
@@ -600,6 +621,12 @@ extern "C" {
     }
 
     void pt1FilterInit(pt1Filter_t *filter, float k)
+    {
+        UNUSED(filter);
+        UNUSED(k);
+    }
+
+    void pt1FilterUpdateCutoff(pt1Filter_t *filter, float k)
     {
         UNUSED(filter);
         UNUSED(k);

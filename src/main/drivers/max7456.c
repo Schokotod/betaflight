@@ -41,7 +41,6 @@
 #include "drivers/osd_symbols.h"
 #include "drivers/time.h"
 
-
 // 10 MHz max SPI frequency
 #define MAX7456_MAX_SPI_CLK_HZ 10000000
 #define MAX7456_INIT_MAX_SPI_CLK_HZ 5000000
@@ -174,9 +173,13 @@
 #define NVM_RAM_SIZE            54
 #define WRITE_NVR               0xA0
 
-// Device type
-#define MAX7456_DEVICE_TYPE_MAX 0
-#define MAX7456_DEVICE_TYPE_AT  1
+// Device type. An enum rather than two #defines so that the debug annotation
+// on DEBUG_MAX7456_SPICLOCK_DEVTYPE can name it, and a consumer reads the
+// device name instead of the number.
+typedef enum {
+    MAX7456_DEVICE_TYPE_MAX = 0,
+    MAX7456_DEVICE_TYPE_AT
+} max7456DeviceType_e;
 
 #define CHARS_PER_LINE      30 // XXX Should be related to VIDEO_BUFFER_CHARS_*?
 
@@ -194,6 +197,7 @@ extDevice_t *dev = &max7456Device;
 
 static bool max7456DeviceDetected = false;
 static uint16_t max7456SpiClockDiv;
+static volatile bool max7456ActiveDma = false;
 
 uint16_t maxScreenSize = VIDEO_BUFFER_CHARS_PAL;
 
@@ -281,7 +285,7 @@ static void max7456ClearLayer(displayPortLayer_e layer)
     memset(getLayerBuffer(layer), 0x20, VIDEO_BUFFER_CHARS_PAL);
 }
 
-void max7456ReInit(void)
+static void max7456ReInit(void)
 {
     uint8_t srdata = 0;
 
@@ -302,8 +306,8 @@ void max7456ReInit(void)
         } else if (VIN_IS_PAL(srdata)) {
             videoSignalReg = VIDEO_MODE_PAL | OSD_ENABLE;
         } else {
-            // No valid input signal, fallback to default (XXX NTSC for now)
-            videoSignalReg = VIDEO_MODE_NTSC | OSD_ENABLE;
+            // No valid input signal, fallback to default (PAL)
+            videoSignalReg = VIDEO_MODE_PAL | OSD_ENABLE;
         }
         break;
     }
@@ -330,9 +334,9 @@ void max7456ReInit(void)
     max7456ClearShadowBuffer();
 }
 
-void max7456PreInit(const max7456Config_t *max7456Config)
+void max7456Preinit(const max7456Config_t *max7456Config)
 {
-    spiPreinitRegister(max7456Config->csTag, max7456Config->preInitOPU ? IOCFG_OUT_PP : IOCFG_IPU, 1);
+    ioPreinitByTag(max7456Config->csTag, max7456Config->preInitOPU ? IOCFG_OUT_PP : IOCFG_IPU, PREINIT_PIN_STATE_HIGH);
 }
 
 // Here we init only CS and try to init MAX for first time.
@@ -414,10 +418,10 @@ max7456InitStatus_e max7456Init(const max7456Config_t *max7456Config, const vcdP
         break;
     }
 
-    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_OVERCLOCK, cpuOverclock);
-    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_DEVTYPE, max7456DeviceType);
-    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_DIVISOR, max7456SpiClockDiv);
-    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_X100, spiCalculateClock(max7456SpiClockDiv) / 10000);
+    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_OVERCLOCK, cpuOverclock);                              //!< CPU Overclocked
+    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_DEVTYPE, max7456DeviceType);                           //!< Device Type [enum:max7456DeviceType_e]
+    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_DIVISOR, max7456SpiClockDiv);                          //!< SPI Clock Divisor
+    DEBUG_SET(DEBUG_MAX7456_SPICLOCK, DEBUG_MAX7456_SPICLOCK_X100, spiCalculateClock(max7456SpiClockDiv) / 10000);  //!< SPI Clock [unit:0.01MHz]
 #else
     UNUSED(max7456Config);
     UNUSED(cpuOverclock);
@@ -498,19 +502,20 @@ void max7456WriteChar(uint8_t x, uint8_t y, uint8_t c)
     }
 }
 
-void max7456Write(uint8_t x, uint8_t y, const char *buff)
+void max7456Write(uint8_t x, uint8_t y, const char *text)
 {
     if (y < VIDEO_LINES_PAL) {
         uint8_t *buffer = getActiveLayerBuffer();
-        for (int i = 0; buff[i] && x + i < CHARS_PER_LINE; i++) {
-            buffer[y * CHARS_PER_LINE + x + i] = buff[i];
+        const uint32_t bufferYOffset = y * CHARS_PER_LINE;
+        for (int i = 0, bufferXOffset = x; text[i] && bufferXOffset < CHARS_PER_LINE; i++, bufferXOffset++) {
+            buffer[bufferYOffset + bufferXOffset] = text[i];
         }
     }
 }
 
 bool max7456LayerSupported(displayPortLayer_e layer)
 {
-    if (layer == DISPLAYPORT_LAYER_FOREGROUND || layer == DISPLAYPORT_LAYER_BACKGROUND) {
+    if (layer == DISPLAYPORT_LAYER_FOREGROUND) {
         return true;
     } else {
         return false;
@@ -539,7 +544,7 @@ bool max7456LayerCopy(displayPortLayer_e destLayer, displayPortLayer_e sourceLay
 
 bool max7456DmaInProgress(void)
 {
-    return spiIsBusy(dev);
+    return max7456ActiveDma;
 }
 
 bool max7456BuffersSynced(void)
@@ -583,9 +588,9 @@ bool max7456ReInitIfRequired(bool forceStallCheck)
 
         const uint8_t videoSense = spiReadRegMsk(dev, MAX7456ADD_STAT);
 
-        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_MODEREG, videoSignalReg & VIDEO_MODE_MASK);
-        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_SENSE, videoSense & 0x7);
-        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_ROWS, max7456GetRowsCount());
+        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_MODEREG, videoSignalReg & VIDEO_MODE_MASK);  //!< Video Mode Register
+        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_SENSE, videoSense & 0x7);                    //!< Video Sense
+        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_ROWS, max7456GetRowsCount());                //!< Row Count
 
         if (videoSense & STAT_LOS) {
             videoDetectTimeMs = 0;
@@ -595,7 +600,7 @@ bool max7456ReInitIfRequired(bool forceStallCheck)
                 if (videoDetectTimeMs) {
                     if (millis() - videoDetectTimeMs > VIDEO_SIGNAL_DEBOUNCE_MS) {
                         max7456ReInit();
-                        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_REINIT, ++reInitCount);
+                        DEBUG_SET(DEBUG_MAX7456_SIGNAL, DEBUG_MAX7456_SIGNAL_REINIT, ++reInitCount);  //!< Reinit Count
                     }
                 } else {
                     // Wait for signal to stabilize
@@ -610,13 +615,23 @@ bool max7456ReInitIfRequired(bool forceStallCheck)
     return stalled;
 }
 
+// Called in ISR context
+static busStatus_e max7456_callbackReady(uintptr_t arg)
+{
+    UNUSED(arg);
+
+    max7456ActiveDma = false;
+
+    return BUS_READY;
+}
+
 // Return true if screen still being transferred
 bool max7456DrawScreen(void)
 {
     static uint16_t pos = 0;
     // This routine doesn't block so need to use static data
     static busSegment_t segments[] = {
-            {.u.link = {NULL, NULL}, 0, true, NULL},
+            {.u.link = {NULL, NULL}, 0, true, max7456_callbackReady},
             {.u.link = {NULL, NULL}, 0, true, NULL},
     };
 
@@ -629,8 +644,13 @@ bool max7456DrawScreen(void)
         bool autoInc = false;
         int posLimit = pos + (maxScreenSize / 2);
 
-        maxSpiBufStartIndex = spiUseMOSI_DMA(dev) ? MAX_BYTES2SEND : MAX_BYTES2SEND_POLLED;
-        maxEncodeTime = spiUseMOSI_DMA(dev) ? MAX_ENCODE_US : MAX_ENCODE_US_POLLED;
+#ifdef USE_DMA
+        const bool useDma = spiUseSDO_DMA(dev);
+#else
+        const bool useDma = false;
+#endif
+        maxSpiBufStartIndex = useDma ? MAX_BYTES2SEND : MAX_BYTES2SEND_POLLED;
+        maxEncodeTime = useDma ? MAX_ENCODE_US : MAX_ENCODE_US_POLLED;
 
         // Abort for now if the bus is still busy
         if (spiIsBusy(dev)) {
@@ -704,6 +724,8 @@ bool max7456DrawScreen(void)
         if (spiBufIndex) {
             segments[0].u.buffers.txData = spiBuf;
             segments[0].len = spiBufIndex;
+
+            max7456ActiveDma = true;
 
             spiSequence(dev, &segments[0]);
 

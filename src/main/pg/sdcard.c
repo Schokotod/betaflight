@@ -30,9 +30,29 @@
 
 #include "sdcard.h"
 #include "drivers/bus_spi.h"
+#include "drivers/sdio.h"
 #include "drivers/io.h"
 #include "drivers/dma.h"
 #include "drivers/dma_reqmap.h"
+
+#ifdef USE_SDCARD_SPI
+#ifndef SDCARD_SPI_INSTANCE
+#define SDCARD_SPI_INSTANCE NULL
+#endif
+#ifndef SDCARD_SPI_CS_PIN
+#define SDCARD_SPI_CS_PIN NONE
+#endif
+#endif // USE_SDCARD_SPI
+
+#ifndef SDCARD_DETECT_PIN
+#define SDCARD_DETECT_PIN NONE
+#endif
+
+#ifdef SDCARD_DETECT_INVERTED
+#define SDCARD_DETECT_IS_INVERTED 1
+#else
+#define SDCARD_DETECT_IS_INVERTED 0
+#endif
 
 PG_REGISTER_WITH_RESET_FN(sdcardConfig_t, sdcardConfig, PG_SDCARD_CONFIG, 2);
 
@@ -56,19 +76,21 @@ void pgResetFn_sdcardConfig(sdcardConfig_t *config)
     config->mode = SDCARD_MODE_NONE;
 #endif
 
-#if defined(STM32H7) && defined(USE_SDCARD_SDIO) // H7 only for now, likely should be applied to F4/F7 too
-    config->mode = SDCARD_MODE_SDIO;
-#endif
-
 #ifdef USE_SDCARD_SPI
     // These settings do not work for Unified Targets
     // They are only left in place to support legacy targets
-    SPIDevice spidevice = spiDeviceByInstance(SDCARD_SPI_INSTANCE);
+    const spiDevice_e spidevice = spiDeviceByInstance((const spiResource_t *)SDCARD_SPI_INSTANCE);
     config->device = SPI_DEV_TO_CFG(spidevice);
     config->chipSelectTag = IO_TAG(SDCARD_SPI_CS_PIN);
 
     if (spidevice != SPIINVALID && config->chipSelectTag) {
         config->mode = SDCARD_MODE_SPI;
+    }
+#endif
+
+#if defined(USE_SDCARD_SDIO) && defined(SDIO_DEVICE)
+    if (SDIO_DEVICE != SDIOINVALID) {
+        config->mode = SDCARD_MODE_SDIO;
     }
 #endif
 }

@@ -51,16 +51,24 @@
 #include "fc/rc.h"
 #include "fc/dispatch.h"
 #include "fc/rc_controls.h"
+#include "fc/rc_modes.h"
 #include "fc/runtime_config.h"
 
-#include "flight/position.h"
+#include "flight/alt_hold.h"
+#include "flight/gps_rescue.h"
 #include "flight/imu.h"
 #include "flight/mixer.h"
 #include "flight/pid.h"
+#include "flight/position.h"
+#include "flight/autopilot.h"
+#include "flight/pos_hold.h"
 
 #include "io/asyncfatfs/asyncfatfs.h"
 #include "io/beeper.h"
 #include "io/dashboard.h"
+#include "io/dronecan/dronecan.h"
+#include "io/flashfs.h"
+#include "io/gimbal_control.h"
 #include "io/gps.h"
 #include "io/ledstrip.h"
 #include "io/piniobox.h"
@@ -75,23 +83,29 @@
 #include "msp/msp_serial.h"
 
 #include "osd/osd.h"
+#if ENABLE_OSD_CUSTOM_TEXT
+#include "osd/osd_custom_text.h"
+#endif
 
 #include "pg/rx.h"
 #include "pg/motor.h"
 
 #include "rx/rx.h"
+#include "rx/rc_stats.h"
 
 #include "scheduler/scheduler.h"
 
 #include "sensors/acceleration.h"
 #include "sensors/adcinternal.h"
 #include "sensors/barometer.h"
+#include "sensors/pitot.h"
 #include "sensors/battery.h"
 #include "sensors/compass.h"
 #include "sensors/esc_sensor.h"
 #include "sensors/gyro.h"
 #include "sensors/sensors.h"
 #include "sensors/rangefinder.h"
+#include "sensors/opticalflow.h"
 
 #include "telemetry/telemetry.h"
 #include "telemetry/crsf.h"
@@ -101,14 +115,7 @@
 #endif
 
 #ifdef USE_USB_CDC_HID
-//TODO: Make it platform independent in the future
-#ifdef STM32F4
-#include "vcpf4/usbd_cdc_vcp.h"
-#include "usbd_hid_core.h"
-#elif defined(STM32F7)
-#include "usbd_cdc_interface.h"
-#include "usbd_hid.h"
-#endif
+#include "io/usb_cdc_hid.h"
 #endif
 
 #include "tasks.h"
@@ -126,24 +133,53 @@ static void taskMain(timeUs_t currentTimeUs)
 #ifdef USE_SDCARD
     afatfs_poll();
 #endif
+
+#ifdef USE_FLASHFS
+    flashfsEraseAsync();
+#endif
 }
+
+#if defined(USE_VCP)
+static bool checkUsbLinkLost(void)
+{
+    static bool usbWasActive;
+    const bool usbActive = usbVcpIsActive();
+    const bool linkLost = usbWasActive && !usbActive;
+
+    if (!usbActive) {
+        // Drop input left over for the dead link so a queued MSP_SET_MOTOR cannot restart the motors.
+        serialPortUsage_t *vcp = findSerialPortUsageByIdentifier(SERIAL_PORT_USB_VCP);
+        while (vcp && vcp->serialPort && serialRxBytesWaiting(vcp->serialPort)) {
+            serialRead(vcp->serialPort);
+        }
+    }
+
+    usbWasActive = usbActive;
+    return linkLost;
+}
+#endif
 
 static void taskHandleSerial(timeUs_t currentTimeUs)
 {
+#if ENABLE_BF_OBL
+    // OBL armed IWDG before BXNS; refresh from TASK_SERIAL — the
+    // scheduler exempts TASK_SERIAL from the time-budget check so it
+    // always runs at its nominal rate. If scheduler itself wedges,
+    // refresh stops, IWDG fires and OBL routes the next boot to DFU.
+    BF_OBL_IWDG_REFRESH();
+#endif
+
     UNUSED(currentTimeUs);
 
 #if defined(USE_VCP)
-    DEBUG_SET(DEBUG_USB, 0, usbCableIsInserted());
-    DEBUG_SET(DEBUG_USB, 1, usbVcpIsConnected());
-#endif
+    DEBUG_SET(DEBUG_USB, 0, usbCableIsInserted());  //!< USB Cable Inserted
+    DEBUG_SET(DEBUG_USB, 1, usbVcpIsConnected());   //!< USB VCP Connected
 
-#ifdef USE_CLI
-    // in cli mode, all serial stuff goes to here. enter cli mode by sending #
-    if (cliMode) {
-        cliProcess();
-        return;
+    if (checkUsbLinkLost() && !ARMING_FLAG(ARMED) && areMotorsRunning()) {
+        mixerResetDisarmedMotors();
     }
 #endif
+
     bool evaluateMspData = ARMING_FLAG(ARMED) ? MSP_SKIP_NON_MSP_DATA : MSP_EVALUATE_NON_MSP_DATA;
     mspSerialProcess(evaluateMspData, mspFcProcessCommand, mspFcProcessReply);
 }
@@ -161,7 +197,7 @@ static void taskBatteryAlerts(timeUs_t currentTimeUs)
 #ifdef USE_ACC
 static void taskUpdateAccelerometer(timeUs_t currentTimeUs)
 {
-    accUpdate(currentTimeUs, &accelerometerConfigMutable()->accelerometerTrims);
+    accUpdate(currentTimeUs);
 }
 #endif
 
@@ -174,7 +210,7 @@ typedef enum {
 
 static rxState_e rxState = RX_STATE_CHECK;
 
-bool taskUpdateRxMainInProgress()
+bool taskUpdateRxMainInProgress(void)
 {
     return (rxState != RX_STATE_CHECK);
 }
@@ -207,7 +243,7 @@ static void taskUpdateRxMain(timeUs_t currentTimeUs)
         break;
 
     case RX_STATE_UPDATE:
-        // updateRcCommands sets rcCommand, which is needed by updateAltHoldState and updateSonarAltHoldState
+        // updateRcCommands sets rcCommand, which is needed by updateAltHold
         updateRcCommands();
         updateArmingStatus();
 
@@ -237,13 +273,21 @@ static void taskUpdateRxMain(timeUs_t currentTimeUs)
         }
     }
 
-    if (debugMode == DEBUG_RX_STATE_TIME) {
-        debug[oldRxState] = rxStateDurationFractionUs[oldRxState] >> RX_TASK_DECAY_SHIFT;
-    }
+    DEBUG_SET(DEBUG_RX_STATE_TIME, oldRxState, rxStateDurationFractionUs[oldRxState] >> RX_TASK_DECAY_SHIFT);  //!< [index:0..2] RX Task Duration ({check|modes|update}) [unit:us]
 
     schedulerSetNextStateTime(rxStateDurationFractionUs[rxState] >> RX_TASK_DECAY_SHIFT);
 }
 
+#ifdef USE_GPS_RESCUE
+static void taskGpsRescue(timeUs_t currentTimeUs)
+{
+    UNUSED(currentTimeUs);
+
+    if (gpsRescueIsConfigured()) {
+        gpsRescueUpdate();
+    }
+}
+#endif
 
 #ifdef USE_BARO
 static void taskUpdateBaro(timeUs_t currentTimeUs)
@@ -252,6 +296,20 @@ static void taskUpdateBaro(timeUs_t currentTimeUs)
 
     if (sensors(SENSOR_BARO)) {
         const uint32_t newDeadline = baroUpdate(currentTimeUs);
+        if (newDeadline != 0) {
+            rescheduleTask(TASK_SELF, newDeadline);
+        }
+    }
+}
+#endif
+
+#ifdef USE_PITOT
+static void taskUpdatePitot(timeUs_t currentTimeUs)
+{
+    // Runs while configured, not just once SENSOR_PITOT is set: a DroneCAN
+    // source only announces itself on its first frame, which pitotUpdate detects.
+    if (pitotIsConfigured()) {
+        const uint32_t newDeadline = pitotUpdate(currentTimeUs);
         if (newDeadline != 0) {
             rescheduleTask(TASK_SELF, newDeadline);
         }
@@ -273,27 +331,40 @@ static void taskUpdateMag(timeUs_t currentTimeUs)
 }
 #endif
 
-#if defined(USE_RANGEFINDER)
-void taskUpdateRangefinder(timeUs_t currentTimeUs)
+#if defined(USE_BARO) || defined(USE_GPS) || defined(USE_RANGEFINDER) || defined(USE_OPTICALFLOW)
+static void taskPositionUpdate(timeUs_t currentTimeUs)
 {
     UNUSED(currentTimeUs);
+    positionUpdate();
+}
+#endif // USE_BARO || USE_GPS || USE_RANGEFINDER || USE_OPTICALFLOW
 
+#if defined(USE_RANGEFINDER)
+static void taskUpdateRangefinder(timeUs_t currentTimeUs)
+{
     if (!sensors(SENSOR_RANGEFINDER)) {
         return;
     }
 
     rangefinderUpdate();
 
-    rangefinderProcess(getCosTiltAngle());
+    rangefinderProcess(currentTimeUs, getCosTiltAngle());
 }
 #endif
 
-#if defined(USE_BARO) || defined(USE_GPS)
-static void taskCalculateAltitude(timeUs_t currentTimeUs)
+#ifdef USE_OPTICALFLOW
+static void taskUpdateOpticalflow(timeUs_t currentTimeUs)
 {
-    calculateEstimatedAltitude(currentTimeUs);
+    UNUSED(currentTimeUs);
+
+    if (!sensors(SENSOR_OPTICALFLOW)) {
+        return;
+    }
+
+    opticalflowUpdate();
+    opticalflowProcess();
 }
-#endif // USE_BARO || USE_GPS
+#endif
 
 #ifdef USE_TELEMETRY
 static void taskTelemetry(timeUs_t currentTimeUs)
@@ -307,13 +378,13 @@ static void taskTelemetry(timeUs_t currentTimeUs)
 #endif
 
 #ifdef USE_CAMERA_CONTROL
-static void taskCameraControl(uint32_t currentTime)
+static void taskCameraControl(timeUs_t currentTimeUs)
 {
     if (ARMING_FLAG(ARMED)) {
         return;
     }
 
-    cameraControlProcess(currentTime);
+    cameraControlProcess(currentTimeUs);
 }
 #endif
 
@@ -331,6 +402,7 @@ task_t tasks[TASK_COUNT];
 
 // Task ID data in .data (initialised data)
 task_attribute_t task_attributes[TASK_COUNT] = {
+
     [TASK_SYSTEM] = DEFINE_TASK("SYSTEM", "LOAD", NULL, taskSystemLoad, TASK_PERIOD_HZ(10), TASK_PRIORITY_MEDIUM_HIGH),
     [TASK_MAIN] = DEFINE_TASK("SYSTEM", "UPDATE", NULL, taskMain, TASK_PERIOD_HZ(1000), TASK_PRIORITY_MEDIUM_HIGH),
     [TASK_SERIAL] = DEFINE_TASK("SERIAL", NULL, NULL, taskHandleSerial, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOW), // 100 Hz should be enough to flush up to 115 bytes @ 115200 baud
@@ -349,10 +421,12 @@ task_attribute_t task_attributes[TASK_COUNT] = {
     [TASK_GYRO] = DEFINE_TASK("GYRO", NULL, NULL, taskGyroSample, TASK_GYROPID_DESIRED_PERIOD, TASK_PRIORITY_REALTIME),
     [TASK_FILTER] = DEFINE_TASK("FILTER", NULL, NULL, taskFiltering, TASK_GYROPID_DESIRED_PERIOD, TASK_PRIORITY_REALTIME),
     [TASK_PID] = DEFINE_TASK("PID", NULL, NULL, taskMainPidLoop, TASK_GYROPID_DESIRED_PERIOD, TASK_PRIORITY_REALTIME),
+
 #ifdef USE_ACC
     [TASK_ACCEL] = DEFINE_TASK("ACC", NULL, NULL, taskUpdateAccelerometer, TASK_PERIOD_HZ(1000), TASK_PRIORITY_MEDIUM),
     [TASK_ATTITUDE] = DEFINE_TASK("ATTITUDE", NULL, NULL, imuUpdateAttitude, TASK_PERIOD_HZ(100), TASK_PRIORITY_MEDIUM),
 #endif
+
     [TASK_RX] = DEFINE_TASK("RX", NULL, rxUpdateCheck, taskUpdateRxMain, TASK_PERIOD_HZ(33), TASK_PRIORITY_HIGH), // If event-based scheduling doesn't work, fallback to periodic scheduling
     [TASK_DISPATCH] = DEFINE_TASK("DISPATCH", NULL, NULL, dispatchProcess, TASK_PERIOD_HZ(1000), TASK_PRIORITY_HIGH),
 
@@ -364,16 +438,29 @@ task_attribute_t task_attributes[TASK_COUNT] = {
     [TASK_GPS] = DEFINE_TASK("GPS", NULL, NULL, gpsUpdate, TASK_PERIOD_HZ(TASK_GPS_RATE), TASK_PRIORITY_MEDIUM), // Required to prevent buffer overruns if running at 115200 baud (115 bytes / period < 256 bytes buffer)
 #endif
 
+#ifdef USE_GPS_RESCUE
+    [TASK_GPS_RESCUE] = DEFINE_TASK("GPS_RESCUE", NULL, NULL, taskGpsRescue, TASK_PERIOD_HZ(TASK_GPS_RESCUE_RATE_HZ), TASK_PRIORITY_MEDIUM),
+#endif
+
+#ifdef USE_ALTITUDE_HOLD
+    [TASK_ALTHOLD] = DEFINE_TASK("ALTHOLD", NULL, altHoldUpdateCheck, updateAltHold, TASK_PERIOD_HZ(ALTHOLD_TASK_RATE_HZ), TASK_PRIORITY_LOW), // Event driven by the position estimator, falls back to periodic scheduling
+#endif
+
+#ifdef USE_POSITION_HOLD
+    [TASK_POSHOLD] = DEFINE_TASK("POSHOLD", NULL, posHoldUpdateCheck, updatePosHold, TASK_PERIOD_HZ(POSHOLD_TASK_RATE_HZ), TASK_PRIORITY_LOW), // Event driven by the position estimator, falls back to periodic scheduling
+#endif
+
 #ifdef USE_MAG
-    [TASK_COMPASS] = DEFINE_TASK("COMPASS", NULL, NULL, taskUpdateMag, TASK_PERIOD_HZ(10), TASK_PRIORITY_LOW),
+    [TASK_MAGHOLD] = DEFINE_TASK("MAGHOLD", NULL, NULL, updateHeadingHold, TASK_PERIOD_HZ(HEADING_HOLD_TASK_RATE_HZ), TASK_PRIORITY_LOW),
+    [TASK_COMPASS] = DEFINE_TASK("COMPASS", NULL, NULL, taskUpdateMag, TASK_PERIOD_HZ(TASK_COMPASS_RATE_HZ), TASK_PRIORITY_LOW),
 #endif
 
 #ifdef USE_BARO
-    [TASK_BARO] = DEFINE_TASK("BARO", NULL, NULL, taskUpdateBaro, TASK_PERIOD_HZ(20), TASK_PRIORITY_LOW),
+    [TASK_BARO] = DEFINE_TASK("BARO", NULL, NULL, taskUpdateBaro, TASK_PERIOD_HZ(TASK_BARO_RATE_HZ), TASK_PRIORITY_LOW),
 #endif
 
-#if defined(USE_BARO) || defined(USE_GPS)
-    [TASK_ALTITUDE] = DEFINE_TASK("ALTITUDE", NULL, NULL, taskCalculateAltitude, TASK_PERIOD_HZ(40), TASK_PRIORITY_LOW),
+#if defined(USE_BARO) || defined(USE_GPS) || defined(USE_RANGEFINDER) || defined(USE_OPTICALFLOW)
+    [TASK_POSITION] = DEFINE_TASK("POSITION", NULL, NULL, taskPositionUpdate, TASK_PERIOD_HZ(TASK_POSITION_RATE_HZ), TASK_PRIORITY_LOW), // Runs the position estimator, which in turn schedules ALTHOLD and POSHOLD
 #endif
 
 #ifdef USE_DASHBOARD
@@ -389,7 +476,7 @@ task_attribute_t task_attributes[TASK_COUNT] = {
 #endif
 
 #ifdef USE_LED_STRIP
-    [TASK_LEDSTRIP] = DEFINE_TASK("LEDSTRIP", NULL, NULL, ledStripUpdate, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOW),
+    [TASK_LEDSTRIP] = DEFINE_TASK("LEDSTRIP", NULL, NULL, ledStripUpdate, TASK_PERIOD_HZ(TASK_LEDSTRIP_RATE_HZ), TASK_PRIORITY_LOW),
 #endif
 
 #ifdef USE_BST
@@ -425,12 +512,34 @@ task_attribute_t task_attributes[TASK_COUNT] = {
 #endif
 
 #ifdef USE_RANGEFINDER
-    [TASK_RANGEFINDER] = DEFINE_TASK("RANGEFINDER", NULL, NULL, taskUpdateRangefinder, TASK_PERIOD_HZ(10), TASK_PRIORITY_LOWEST),
+    [TASK_RANGEFINDER] = DEFINE_TASK("RANGEFINDER", NULL, NULL, taskUpdateRangefinder, TASK_PERIOD_HZ(10), TASK_PRIORITY_MEDIUM),
+#endif
+#ifdef USE_OPTICALFLOW
+    [TASK_OPTICALFLOW] = DEFINE_TASK("OPTICALFLOW", NULL, NULL, taskUpdateOpticalflow, TASK_PERIOD_HZ(10), TASK_PRIORITY_MEDIUM),
+#endif
+#ifdef USE_PITOT
+    [TASK_PITOT] = DEFINE_TASK("PITOT", NULL, NULL, taskUpdatePitot, TASK_PERIOD_HZ(TASK_PITOT_RATE_HZ), TASK_PRIORITY_LOW),
+#endif
+#ifdef USE_CRSF_V3
+    [TASK_SPEED_NEGOTIATION] = DEFINE_TASK("SPEED_NEGOT'N", NULL, NULL, speedNegotiationProcess, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOW),
 #endif
 
-#ifdef USE_CRSF_V3
-    [TASK_SPEED_NEGOTIATION] = DEFINE_TASK("SPEED_NEGOTIATION", NULL, NULL, speedNegotiationProcess, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOWEST),
+#ifdef USE_RC_STATS
+    [TASK_RC_STATS] = DEFINE_TASK("RC_STATS", NULL, NULL, rcStatsUpdate, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOW),
 #endif
+
+#ifdef USE_GIMBAL
+    [TASK_GIMBAL] = DEFINE_TASK("GIMBAL", NULL, NULL, gimbalUpdate, TASK_PERIOD_HZ(100), TASK_PRIORITY_MEDIUM),
+#endif
+
+#if ENABLE_OSD_CUSTOM_TEXT
+    [TASK_OSD_CUSTOM_TEXT] = DEFINE_TASK("OSD_CTEXT", NULL, NULL, osdCustomTextUpdate, TASK_PERIOD_HZ(100), TASK_PRIORITY_LOW),
+#endif
+
+#if ENABLE_DRONECAN
+    [TASK_DRONECAN] = DEFINE_TASK("DRONECAN", NULL, NULL, dronecanUpdate, TASK_PERIOD_HZ(50), TASK_PRIORITY_LOW),
+#endif
+
 };
 
 task_t *getTask(unsigned taskId)
@@ -438,12 +547,31 @@ task_t *getTask(unsigned taskId)
     return &tasks[taskId];
 }
 
-void tasksInit(void)
+// Has to be done before tasksInit() in order to initialize any task data which may be uninitialized at boot
+void tasksInitData(void)
 {
     for (int i = 0; i < TASK_COUNT; i++) {
         tasks[i].attribute = &task_attributes[i];
     }
+}
 
+// Tasks gated on a mode being assigned to a switch, rather than on a feature or a sensor.
+// Features only change across a reboot, but mode ranges change live over MSP
+// (MSP_SET_MODE_RANGE calls rcControlsInit()), so these gates must be re-evaluated
+// whenever the mode configuration is re-analysed - not just at boot. Without that, a mode
+// assigned in the Configurator reports active while its task never runs.
+void tasksUpdateModeGatedEnables(void)
+{
+#ifdef USE_MAG
+    // Heading hold needs only a compass - it is deliberately not tied to position hold,
+    // whose task is gated on GPS or optical flow. MAG_MODE is rarely used, so the task
+    // only runs for pilots who have actually put the mode on a switch.
+    setTaskEnabled(TASK_MAGHOLD, sensors(SENSOR_MAG) && isModeActivationConditionPresent(BOXMAG));
+#endif
+}
+
+void tasksInit(void)
+{
     schedulerInit();
 
     setTaskEnabled(TASK_MAIN, true);
@@ -494,6 +622,12 @@ void tasksInit(void)
     }
 #endif
 
+#ifdef USE_OPTICALFLOW
+    if (sensors(SENSOR_OPTICALFLOW)) {
+        setTaskEnabled(TASK_OPTICALFLOW, featureIsEnabled(FEATURE_OPTICALFLOW));
+    }
+#endif
+
     setTaskEnabled(TASK_RX, true);
 
     setTaskEnabled(TASK_DISPATCH, dispatchIsEnabled());
@@ -506,6 +640,27 @@ void tasksInit(void)
     setTaskEnabled(TASK_GPS, featureIsEnabled(FEATURE_GPS));
 #endif
 
+#ifdef USE_GPS_RESCUE
+    setTaskEnabled(TASK_GPS_RESCUE, featureIsEnabled(FEATURE_GPS));
+#endif
+
+    // Both hold modes are driven by TASK_POSITION, so they are judged on the same
+    // terms as it is (see below) restricted to the axes each one needs: Z sources
+    // for altitude hold, XY sources for position hold. Enabling a hold mode whose
+    // estimator is not running would leave it working from a state that never updates.
+#ifdef USE_ALTITUDE_HOLD
+    setTaskEnabled(TASK_ALTHOLD, sensors(SENSOR_BARO) ||
+                                 featureIsEnabled(FEATURE_RANGEFINDER) ||
+                                 featureIsEnabled(FEATURE_GPS));
+#endif
+
+#ifdef USE_POSITION_HOLD
+    setTaskEnabled(TASK_POSHOLD, featureIsEnabled(FEATURE_GPS) ||
+                                 featureIsEnabled(FEATURE_OPTICALFLOW));
+#endif
+
+    tasksUpdateModeGatedEnables();
+
 #ifdef USE_MAG
     setTaskEnabled(TASK_COMPASS, sensors(SENSOR_MAG));
 #endif
@@ -513,9 +668,24 @@ void tasksInit(void)
 #ifdef USE_BARO
     setTaskEnabled(TASK_BARO, sensors(SENSOR_BARO));
 #endif
+#ifdef USE_PITOT
+    setTaskEnabled(TASK_PITOT, pitotIsConfigured());
+#endif
 
-#if defined(USE_BARO) || defined(USE_GPS)
-    setTaskEnabled(TASK_ALTITUDE, sensors(SENSOR_BARO) || featureIsEnabled(FEATURE_GPS));
+#if defined(USE_BARO) || defined(USE_GPS) || defined(USE_RANGEFINDER) || defined(USE_OPTICALFLOW)
+    // Run the estimator if any measurement source is configured. Judged on the
+    // features, not on detection: this is evaluated once, so a source detected
+    // after tasksInit() would otherwise leave the estimator permanently off, and
+    // a configured source that never appears costs only a prediction step.
+    // Baro has no feature flag so it is judged by detection, which is safe because
+    // it is probed synchronously at boot with nothing to arrive late. SENSOR_GPS
+    // means "has a fix" (set at runtime in gps.c) rather than "hardware present".
+    // Optical flow belongs here because it is an XY source: a flow-only craft has no
+    // baro, GPS or rangefinder but still holds position.
+    setTaskEnabled(TASK_POSITION, sensors(SENSOR_BARO) ||
+                                  featureIsEnabled(FEATURE_GPS) ||
+                                  featureIsEnabled(FEATURE_RANGEFINDER) ||
+                                  featureIsEnabled(FEATURE_OPTICALFLOW));
 #endif
 
 #ifdef USE_DASHBOARD
@@ -573,7 +743,7 @@ void tasksInit(void)
 #endif
 
 #ifdef USE_VTX_CONTROL
-#if defined(USE_VTX_RTC6705) || defined(USE_VTX_SMARTAUDIO) || defined(USE_VTX_TRAMP)
+#if defined(USE_VTX_RTC6705) || defined(USE_VTX_SMARTAUDIO) || defined(USE_VTX_TRAMP) || defined(USE_VTX_MSP)
     setTaskEnabled(TASK_VTXCTRL, true);
 #endif
 #endif
@@ -590,5 +760,24 @@ void tasksInit(void)
     const bool useCRSF = rxRuntimeState.serialrxProvider == SERIALRX_CRSF;
     setTaskEnabled(TASK_SPEED_NEGOTIATION, useCRSF);
 #endif
-}
 
+#if ENABLE_SIMULATOR_MULTITHREAD
+    rescheduleTask(TASK_RX, 1);
+#endif
+
+#ifdef USE_RC_STATS
+    setTaskEnabled(TASK_RC_STATS, true);
+#endif
+
+#ifdef USE_GIMBAL
+    setTaskEnabled(TASK_GIMBAL, true);
+#endif
+
+#if ENABLE_OSD_CUSTOM_TEXT
+    setTaskEnabled(TASK_OSD_CUSTOM_TEXT, true);
+#endif
+
+#if ENABLE_DRONECAN
+    setTaskEnabled(TASK_DRONECAN, dronecanIsInitialised());
+#endif
+}

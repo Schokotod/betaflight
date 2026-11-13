@@ -33,9 +33,7 @@
 
 #include "drivers/bus_spi.h"
 #include "drivers/io.h"
-#include "drivers/io_impl.h"
 #include "drivers/nvic.h"
-#include "drivers/rcc.h"
 #include "drivers/system.h"
 #include "drivers/time.h"
 
@@ -70,12 +68,12 @@ extDevice_t *rxSpiGetDevice(void)
     return dev;
 }
 
-void rxSpiDevicePreInit(const rxSpiConfig_t *rxSpiConfig)
+void rxSpiDevicePreinit(const rxSpiConfig_t *rxSpiConfig)
 {
-    spiPreinitRegister(rxSpiConfig->csnTag, IOCFG_IPU, 1);
+    ioPreinitByTag(rxSpiConfig->csnTag, IOCFG_IPU, PREINIT_PIN_STATE_HIGH);
 }
 
-void rxSpiExtiHandler(extiCallbackRec_t* callback)
+static void rxSpiExtiHandler(extiCallbackRec_t* callback)
 {
     UNUSED(callback);
 
@@ -92,12 +90,12 @@ void rxSpiSetNormalSpeedMhz(uint32_t mhz)
     spiNormalSpeedMhz = mhz;
 }
 
-void rxSpiNormalSpeed()
+void rxSpiNormalSpeed(void)
 {
     spiSetClkDivisor(dev, spiCalculateDivider(spiNormalSpeedMhz));
 }
 
-void rxSpiStartupSpeed()
+void rxSpiStartupSpeed(void)
 {
     spiSetClkDivisor(dev, spiCalculateDivider(RX_STARTUP_MAX_SPI_CLK_HZ));
 }
@@ -149,7 +147,11 @@ void rxSpiExtiInit(ioConfig_t rxSpiExtiPinConfig, extiTrigger_t rxSpiExtiPinTrig
 
 void rxSpiDmaEnable(bool enable)
 {
+#ifdef USE_DMA
     spiDmaEnable(dev, enable);
+#else
+    UNUSED(enable);
+#endif
 }
 
 uint8_t rxSpiTransferByte(uint8_t data)

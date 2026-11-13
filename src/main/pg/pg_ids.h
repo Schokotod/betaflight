@@ -70,7 +70,7 @@
 #define PG_RX_CHANNEL_RANGE_CONFIG 44
 #define PG_MODE_COLOR_CONFIG 45  // part of led strip, structs OK
 #define PG_SPECIAL_COLOR_CONFIG 46  // part of led strip, structs OK
-#define PG_PILOT_CONFIG 47 // does not exist in betaflight
+#define PG_PILOT_CONFIG 47 // used for pilot and craft name from 4.4
 #define PG_MSP_SERVER_CONFIG 48 // does not exist in betaflight
 #define PG_VOLTAGE_METER_CONFIG 49 // renamed from PG_VOLTAGE_METER_CONFIG    // deprecated
 #define PG_AMPERAGE_METER_CONFIG 50 // renamed from PG_AMPERAGE_METER_CONFIG  // deprecated
@@ -81,18 +81,20 @@
 #define PG_GPS_RESCUE 55 // struct OK
 #define PG_POSITION 56
 #define PG_VTX_IO_CONFIG 57
+#define PG_GPS_LAP_TIMER 58
+#define PG_ALTHOLD_CONFIG 59
+#define PG_AUTOPILOT 60
+#define PG_POSHOLD_CONFIG 61
 
 // Driver configuration
 #define PG_DRIVER_PWM_RX_CONFIG 100 // does not exist in betaflight
 #define PG_DRIVER_FLASHCHIP_CONFIG 101 // does not exist in betaflight
-
 
 // cleanflight v2 specific parameter group ids start at 256
 #define PG_CURRENT_SENSOR_ADC_CONFIG 256
 #define PG_CURRENT_SENSOR_VIRTUAL_CONFIG 257
 #define PG_VOLTAGE_SENSOR_ADC_CONFIG 258
 #define PG_VTX_SETTINGS_CONFIG 259
-
 
 // betaflight specific parameter group ids start at 500
 #define PG_BETAFLIGHT_START         500
@@ -153,14 +155,29 @@
 #define PG_DYN_NOTCH_CONFIG         554
 #define PG_RX_EXPRESSLRS_SPI_CONFIG 555
 #define PG_SCHEDULER_CONFIG         556
-#define PG_BETAFLIGHT_END           556
+#define PG_MSP_CONFIG               557
+//#define PG_SOFTSERIAL_PIN_CONFIG    558  // removed, merged into SERIAL_PIN_CONFIG
+#define PG_GIMBAL_TRACK_CONFIG      559
+#define PG_OPTICALFLOW_CONFIG       560
+#define PG_BATTERY_PROFILES         561
+#define PG_FLIGHT_PLAN_CONFIG       562
+#define PG_CAN_PIN_CONFIG           563
+#define PG_CAN_CONFIG               564
+#define PG_DRONECAN_CONFIG          565
+#define PG_DRONECAN_DNA_CONFIG      567
+#define PG_OSD_NAV_MAP_CONFIG       568
+#define PG_PITOT_CONFIG             569
+#define PG_LAUNCH_WING_CONFIG       570
+#define PG_AUTOPILOT_WING           571
 
+// TODO TBC
+#define PG_DISPLAY_PORT_FBOSD_CONFIG 566
 
 // OSD configuration (subject to change)
 #define PG_OSD_FONT_CONFIG 2047
 #define PG_OSD_VIDEO_CONFIG 2046
 #define PG_OSD_ELEMENT_CONFIG 2045
-
+#define PG_OSD_CUSTOM_TEXT_CONFIG 2044
 
 // 4095 is currently the highest number that can be used for a PGN due to the top 4 bits of the 16 bit value being reserved for the version when the PG is stored in an EEPROM.
 #define PG_RESERVED_FOR_TESTING_1 4095

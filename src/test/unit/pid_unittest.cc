@@ -24,11 +24,21 @@
 #include "gtest/gtest.h"
 #include "build/debug.h"
 
-bool simulatedAirmodeEnabled = true;
+bool simulatedThrottleRaised = true;
 float simulatedSetpointRate[3] = { 0,0,0 };
 float simulatedPrevSetpointRate[3] = { 0,0,0 };
 float simulatedRcDeflection[3] = { 0,0,0 };
+float simulatedMaxRcDeflectionAbs = 0;
+float simulatedMixerGetRcThrottle = 0;
+float simulatedRcCommandDelta[3] = { 1,1,1 };
+float simulatedRawSetpoint[3] = { 0,0,0 };
+float simulatedMaxRate[3] = { 670,670,670 };
+float simulatedFeedforward[3] = { 0,0,0 };
 float simulatedMotorMixRange = 0.0f;
+bool simulatedBelowLandingAltitude = false;
+bool simulatedFixedWing = false;
+bool simulatedAutopilotLanding = false;
+int disarmCount = 0;
 
 int16_t debug[DEBUG16_VALUE_COUNT];
 uint8_t debugMode;
@@ -59,93 +69,133 @@ extern "C" {
     #include "flight/mixer.h"
     #include "flight/pid.h"
     #include "flight/pid_init.h"
+    #include "flight/position.h"
 
     #include "io/gps.h"
 
+    #include "pg/autopilot.h"
     #include "pg/pg.h"
     #include "pg/pg_ids.h"
+
+    #include "pg/rx.h"
+    #include "rx/rx.h"
 
     #include "sensors/gyro.h"
     #include "sensors/acceleration.h"
 
+    acc_t acc;
     gyro_t gyro;
     attitudeEulerAngles_t attitude;
 
+    PG_REGISTER(rxConfig_t, rxConfig, PG_RX_CONFIG, 0);
     PG_REGISTER(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 0);
     PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 2);
+    PG_REGISTER(positionConfig_t, positionConfig, PG_SYSTEM_CONFIG, 4);
+    PG_REGISTER(autopilotConfig_t, autopilotConfig, PG_AUTOPILOT, 0);
+
+    float autopilotAngle[RP_AXIS_COUNT];
 
     bool unitLaunchControlActive = false;
     launchControlMode_e unitLaunchControlMode = LAUNCH_CONTROL_MODE_NORMAL;
 
     float getMotorMixRange(void) { return simulatedMotorMixRange; }
     float getSetpointRate(int axis) { return simulatedSetpointRate[axis]; }
-    bool isAirmodeActivated() { return simulatedAirmodeEnabled; }
+    bool wasThrottleRaised(void) { return simulatedThrottleRaised; }
     float getRcDeflectionAbs(int axis) { return fabsf(simulatedRcDeflection[axis]); }
+
+    // used by auto-disarm code
+    float getMaxRcDeflectionAbs() { return fabsf(simulatedMaxRcDeflectionAbs); }
+    float mixerGetRcThrottle() { return fabsf(simulatedMixerGetRcThrottle); }
+
+
+    bool isBelowLandingAltitude(void) { return simulatedBelowLandingAltitude; }
+    bool isFixedWing(void) { return simulatedFixedWing; }
+    bool autopilotIsLanding(void) { return simulatedAutopilotLanding; }
+
     void systemBeep(bool) { }
     bool gyroOverflowDetected(void) { return false; }
     float getRcDeflection(int axis) { return simulatedRcDeflection[axis]; }
+    float getRcDeflectionRaw(int axis) { return simulatedRcDeflection[axis]; }
+    float getRawSetpoint(int axis) { return simulatedRawSetpoint[axis]; }
+    float getFeedforward(int axis) {
+        return simulatedSetpointRate[axis] - simulatedPrevSetpointRate[axis];
+    }
     void beeperConfirmationBeeps(uint8_t) { }
     bool isLaunchControlActive(void) {return unitLaunchControlActive; }
-    void disarm(flightLogDisarmReason_e) { }
-    float applyFeedforwardLimit(int axis, float value, float Kp, float currentPidSetpoint)
+    void disarm(flightLogDisarmReason_e) { disarmCount++; }
+    float getMaxRcRate(int axis)
     {
         UNUSED(axis);
-        UNUSED(Kp);
-        UNUSED(currentPidSetpoint);
-        return value;
+        float maxRate = simulatedMaxRate[axis];
+        return maxRate;
     }
-    void feedforwardInit(const pidProfile_t) { }
-    float feedforwardApply(int axis, bool newRcFrame, feedforwardAveraging_t feedforwardAveraging)
-    {
-        UNUSED(newRcFrame);
-        UNUSED(feedforwardAveraging);
-        const float feedforwardTransitionFactor = pidGetFeedforwardTransitionFactor();
-        float setpointDelta = simulatedSetpointRate[axis] - simulatedPrevSetpointRate[axis];
-        setpointDelta *= feedforwardTransitionFactor > 0 ? MIN(1.0f, getRcDeflectionAbs(axis) * feedforwardTransitionFactor) : 1;
-        return setpointDelta;
-    }
-    bool shouldApplyFeedforwardLimits(int axis)
-    {
-        UNUSED(axis);
-        return true;
-    }
-    bool getShouldUpdateFeedforward() { return true; }
     void initRcProcessing(void) { }
 }
 
 pidProfile_t *pidProfile;
 
+TEST(PidProfileStorageTest, RejectsProfilesFromBeforeSpeedCurveFields)
+{
+    const pgRegistry_t *registry = pgFind(PG_PID_PROFILE);
+    ASSERT_NE(nullptr, registry);
+
+    // Version 12 stored smaller array elements, so copying that array would
+    // shift every profile after the first one into unrelated settings.
+    uint8_t savedProfiles[PID_PROFILE_COUNT * 228];
+    memset(savedProfiles, 0xFF, sizeof(savedProfiles));
+    pgReset(registry);
+    pidProfile_t defaults[PID_PROFILE_COUNT];
+    memcpy(defaults, pidProfilesMutable(0), sizeof(defaults));
+
+    EXPECT_FALSE(pgLoad(registry, savedProfiles, sizeof(savedProfiles), 12));
+    EXPECT_EQ(0, memcmp(defaults, pidProfilesMutable(0), sizeof(defaults)));
+}
+
+TEST(PidProfileStorageTest, LoadsCurrentProfilesWithoutShiftingSettings)
+{
+    const pgRegistry_t *registry = pgFind(PG_PID_PROFILE);
+    ASSERT_NE(nullptr, registry);
+    pgReset(registry);
+    for (unsigned i = 0; i < PID_PROFILE_COUNT; i++) {
+        pidProfilesMutable(i)->pid[PID_ROLL].P = 77 + i;
+        pidProfilesMutable(i)->speed_curve_vref = 30 + i;
+    }
+    pidProfile_t savedProfiles[PID_PROFILE_COUNT];
+    ASSERT_EQ(sizeof(savedProfiles), pgStore(registry, savedProfiles, sizeof(savedProfiles)));
+    ASSERT_TRUE(pgLoad(registry, savedProfiles, sizeof(savedProfiles), pgVersion(registry)));
+    EXPECT_EQ(0, memcmp(savedProfiles, pidProfilesMutable(0), sizeof(savedProfiles)));
+}
+
 int loopIter = 0;
 
 // Always use same defaults for testing in future releases even when defaults change
-void setDefaultTestSettings(void) {
+void setDefaultTestSettings(void)
+{
     pgResetAll();
     pidProfile = pidProfilesMutable(1);
-    pidProfile->pid[PID_ROLL]  =  { 40, 40, 30, 65 };
-    pidProfile->pid[PID_PITCH] =  { 58, 50, 35, 60 };
-    pidProfile->pid[PID_YAW]   =  { 70, 45, 20, 60 };
-    pidProfile->pid[PID_LEVEL] =  { 50, 50, 75, 0 };
+    pidProfile->pid[PID_ROLL]  =  { 40, 40, 30, 65, 0 };
+    pidProfile->pid[PID_PITCH] =  { 58, 50, 35, 60, 0 };
+    pidProfile->pid[PID_YAW]   =  { 70, 45, 20, 60, 0 };
+    pidProfile->pid[PID_LEVEL] =  { 50, 50, 75, 50, 0 };
 
-    // Compensate for the upscaling done without 'use_integrated_yaw'
+    // Compensate for the upscaling done on the yaw axis
     pidProfile->pid[PID_YAW].I = pidProfile->pid[PID_YAW].I / 2.5f;
 
-    pidProfile->pidSumLimit = PIDSUM_LIMIT;
-    pidProfile->pidSumLimitYaw = PIDSUM_LIMIT_YAW;
+    pidProfile->pidSumLimit = PIDSUM_LIMIT;        // 500
+    pidProfile->pidSumLimitYaw = PIDSUM_LIMIT_YAW; // 400
     pidProfile->yaw_lowpass_hz = 0;
     pidProfile->dterm_lpf1_static_hz = 100;
     pidProfile->dterm_lpf2_static_hz = 0;
     pidProfile->dterm_notch_hz = 260;
     pidProfile->dterm_notch_cutoff = 160;
-    pidProfile->dterm_lpf1_type = FILTER_BIQUAD;
-    pidProfile->itermWindupPointPercent = 50;
+    pidProfile->dterm_lpf1_type = FILTER_SVF;
+    pidProfile->itermWindup = 80;
     pidProfile->pidAtMinThrottle = PID_STABILISATION_ON;
-    pidProfile->levelAngleLimit = 55;
+    pidProfile->angle_limit = 60;
     pidProfile->feedforward_transition = 100;
     pidProfile->yawRateAccelLimit = 100;
     pidProfile->rateAccelLimit = 0;
-    pidProfile->antiGravityMode = ANTI_GRAVITY_SMOOTH;
-    pidProfile->itermThrottleThreshold = 250;
-    pidProfile->itermAcceleratorGain = 1000;
+    pidProfile->anti_gravity_gain = 10;
     pidProfile->crash_time = 500;
     pidProfile->crash_delay = 0;
     pidProfile->crash_recovery_angle = 10;
@@ -154,8 +204,8 @@ void setDefaultTestSettings(void) {
     pidProfile->crash_gthreshold = 400;
     pidProfile->crash_setpoint_threshold = 350;
     pidProfile->crash_recovery = PID_CRASH_RECOVERY_OFF;
-    pidProfile->horizon_tilt_effect = 75;
-    pidProfile->horizon_tilt_expert_mode = false;
+    pidProfile->horizon_limit_degrees = 135;
+    pidProfile->horizon_ignore_sticks = false;
     pidProfile->crash_limit_yaw = 200;
     pidProfile->itermLimit = 150;
     pidProfile->throttle_boost = 0;
@@ -164,7 +214,6 @@ void setDefaultTestSettings(void) {
     pidProfile->iterm_relax = ITERM_RELAX_OFF,
     pidProfile->iterm_relax_cutoff = 11,
     pidProfile->iterm_relax_type = ITERM_RELAX_SETPOINT,
-    pidProfile->abs_control_gain = 0,
     pidProfile->launchControlMode = LAUNCH_CONTROL_MODE_NORMAL,
     pidProfile->launchControlGain = 40,
     pidProfile->level_race_mode = false,
@@ -172,11 +221,13 @@ void setDefaultTestSettings(void) {
     gyro.targetLooptime = 8000;
 }
 
-timeUs_t currentTestTime(void) {
+timeUs_t currentTestTime(void)
+{
     return targetPidLooptime * loopIter++;
 }
 
-void resetTest(void) {
+void resetTest(void)
+{
     loopIter = 0;
     pidRuntime.tpaFactor = 1.0f;
     simulatedMotorMixRange = 0.0f;
@@ -190,9 +241,11 @@ void resetTest(void) {
         pidData[axis].I = 0;
         pidData[axis].D = 0;
         pidData[axis].F = 0;
+        pidData[axis].S = 0;
         pidData[axis].Sum = 0;
         simulatedSetpointRate[axis] = 0;
         simulatedRcDeflection[axis] = 0;
+        simulatedRawSetpoint[axis] = 0;
         gyro.gyroADCf[axis] = 0;
     }
     attitude.values.roll = 0;
@@ -200,13 +253,14 @@ void resetTest(void) {
     attitude.values.yaw = 0;
 
     flightModeFlags = 0;
+    simulatedBelowLandingAltitude = false;
+    simulatedFixedWing = false;
+    simulatedAutopilotLanding = false;
+    acc.jerkMagnitude = 0.0f;
     unitLaunchControlActive = false;
     pidProfile->launchControlMode = unitLaunchControlMode;
     pidInit(pidProfile);
     loadControlRateProfile();
-
-    currentControlRateProfile->levelExpo[FD_ROLL] = 0;
-    currentControlRateProfile->levelExpo[FD_PITCH] = 0;
 
     // Run pidloop for a while after reset
     for (int loop = 0; loop < 20; loop++) {
@@ -214,14 +268,16 @@ void resetTest(void) {
     }
 }
 
-void setStickPosition(int axis, float stickRatio) {
+void setStickPosition(int axis, float stickRatio)
+{
     simulatedPrevSetpointRate[axis] = simulatedSetpointRate[axis];
     simulatedSetpointRate[axis] = 1998.0f * stickRatio;
     simulatedRcDeflection[axis] = stickRatio;
 }
 
 // All calculations will have 10% tolerance
-float calculateTolerance(float input) {
+float calculateTolerance(float input)
+{
     return fabsf(input * 0.1f);
 }
 
@@ -237,7 +293,8 @@ TEST(pidControllerTest, testInitialisation)
     }
 }
 
-TEST(pidControllerTest, testStabilisationDisabled) {
+TEST(pidControllerTest, testStabilisationDisabled)
+{
     ENABLE_ARMING_FLAG(ARMED);
     // Run few loops to make sure there is no error building up when stabilisation disabled
 
@@ -257,7 +314,8 @@ TEST(pidControllerTest, testStabilisationDisabled) {
     }
 }
 
-TEST(pidControllerTest, testPidLoop) {
+TEST(pidControllerTest, testPidLoop)
+{
     // Make sure to start with fresh values
     resetTest();
     ENABLE_ARMING_FLAG(ARMED);
@@ -306,33 +364,44 @@ TEST(pidControllerTest, testPidLoop) {
     EXPECT_NEAR(231.4, pidData[FD_PITCH].D, calculateTolerance(231.4));
     EXPECT_FLOAT_EQ(0, pidData[FD_YAW].D);
 
-    // Add some rotation on YAW to generate error
-    gyro.gyroADCf[FD_YAW] = 100;
+    // Add some rotation on YAW to generate error, but not enough to trigger pidSumLimitYaw
+    gyro.gyroADCf[FD_YAW] = 10;
     pidController(pidProfile, currentTestTime());
 
     // Loop 4 - Expect PID loop reaction to PITCH error, ROLL and PITCH are still in error
     EXPECT_NEAR(-128.1, pidData[FD_ROLL].P, calculateTolerance(-128.1));
     EXPECT_NEAR(185.8, pidData[FD_PITCH].P, calculateTolerance(185.8));
-    EXPECT_NEAR(-224.2, pidData[FD_YAW].P, calculateTolerance(-224.2));
+    EXPECT_NEAR(-22.4, pidData[FD_YAW].P, calculateTolerance(-22.4));
     EXPECT_NEAR(-23.5, pidData[FD_ROLL].I, calculateTolerance(-23.5));
     EXPECT_NEAR(19.6, pidData[FD_PITCH].I, calculateTolerance(19.6));
-    EXPECT_NEAR(-8.7, pidData[FD_YAW].I, calculateTolerance(-8.7));
+    EXPECT_NEAR(-0.87, pidData[FD_YAW].I, calculateTolerance(-0.87));
     EXPECT_FLOAT_EQ(0, pidData[FD_ROLL].D);
     EXPECT_FLOAT_EQ(0, pidData[FD_PITCH].D);
-    EXPECT_NEAR(-132.25, pidData[FD_YAW].D, calculateTolerance(-132.25));
 
-    // Simulate Iterm behaviour during mixer saturation
-    simulatedMotorMixRange = 1.2f;
+    // Simulate Iterm growth if not saturated
     pidController(pidProfile, currentTestTime());
     EXPECT_NEAR(-31.3, pidData[FD_ROLL].I, calculateTolerance(-31.3));
     EXPECT_NEAR(29.3, pidData[FD_PITCH].I, calculateTolerance(29.3));
-    EXPECT_NEAR(-8.8, pidData[FD_YAW].I, calculateTolerance(-8.8));
-    simulatedMotorMixRange = 0;
+    EXPECT_NEAR(-1.76, pidData[FD_YAW].I, calculateTolerance(-1.76));
+        EXPECT_NEAR(-24.2, pidData[FD_YAW].Sum, calculateTolerance(-24.2));
 
     // Match the stick to gyro to stop error
     simulatedSetpointRate[FD_ROLL] = 100;
     simulatedSetpointRate[FD_PITCH] = -100;
-    simulatedSetpointRate[FD_YAW] = 100;
+    simulatedSetpointRate[FD_YAW] = 10; // error
+
+    pidController(pidProfile, currentTestTime());
+    // Iterm is stalled as it is not accumulating anymore
+    EXPECT_FLOAT_EQ(0, pidData[FD_ROLL].P);
+    EXPECT_FLOAT_EQ(0, pidData[FD_PITCH].P);
+    EXPECT_FLOAT_EQ(0, pidData[FD_YAW].P);
+    EXPECT_NEAR(-31.3, pidData[FD_ROLL].I, calculateTolerance(-31.3));
+    EXPECT_NEAR(29.3, pidData[FD_PITCH].I, calculateTolerance(29.3));
+    EXPECT_NEAR(-1.76, pidData[FD_YAW].I, calculateTolerance(-1.76));
+    EXPECT_FLOAT_EQ(0, pidData[FD_ROLL].D);
+    EXPECT_FLOAT_EQ(0, pidData[FD_PITCH].D);
+    EXPECT_FLOAT_EQ(0, pidData[FD_YAW].D);
+
 
     for(int loop = 0; loop < 5; loop++) {
         pidController(pidProfile, currentTestTime());
@@ -343,7 +412,7 @@ TEST(pidControllerTest, testPidLoop) {
     EXPECT_FLOAT_EQ(0, pidData[FD_YAW].P);
     EXPECT_NEAR(-31.3, pidData[FD_ROLL].I, calculateTolerance(-31.3));
     EXPECT_NEAR(29.3, pidData[FD_PITCH].I, calculateTolerance(29.3));
-    EXPECT_NEAR(-10.6, pidData[FD_YAW].I, calculateTolerance(-10.6));
+    EXPECT_NEAR(-1.76, pidData[FD_YAW].I, calculateTolerance(-1.76));
     EXPECT_FLOAT_EQ(0, pidData[FD_ROLL].D);
     EXPECT_FLOAT_EQ(0, pidData[FD_PITCH].D);
     EXPECT_FLOAT_EQ(0, pidData[FD_YAW].D);
@@ -364,7 +433,8 @@ TEST(pidControllerTest, testPidLoop) {
     EXPECT_FLOAT_EQ(0, pidData[FD_YAW].D);
 }
 
-TEST(pidControllerTest, testPidLevel) {
+TEST(pidControllerTest, testPidLevel)
+{
     // Make sure to start with fresh values
     resetTest();
     ENABLE_ARMING_FLAG(ARMED);
@@ -372,128 +442,337 @@ TEST(pidControllerTest, testPidLevel) {
 
     // Test Angle mode response
     enableFlightMode(ANGLE_MODE);
-    float currentPidSetpoint = 30;
+    float currentPidSetpointRoll = 0;
+    float currentPidSetpointPitch = 0;
+    float calculatedAngleSetpoint = 0;
     rollAndPitchTrims_t angleTrim = { { 0, 0 } };
 
-    currentPidSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(0, currentPidSetpoint);
-    currentPidSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(0, currentPidSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpointRoll, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(0, calculatedAngleSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpointPitch, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(0, calculatedAngleSetpoint);
+
+    currentPidSetpointRoll = 200;
+    calculatedAngleSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpointRoll, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(51.456356, calculatedAngleSetpoint);
+    currentPidSetpointPitch = -200;
+    calculatedAngleSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpointPitch, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(-51.456356, calculatedAngleSetpoint);
+
+    currentPidSetpointRoll = 400;
+    calculatedAngleSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpointRoll, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(128.94597, calculatedAngleSetpoint);
+    currentPidSetpointPitch = -400;
+    calculatedAngleSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpointPitch, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(-128.94597, calculatedAngleSetpoint);
 
     // Test attitude response
-    setStickPosition(FD_ROLL, 1.0f);
-    setStickPosition(FD_PITCH, -1.0f);
-    currentPidSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(275, currentPidSetpoint);
-    currentPidSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(-275, currentPidSetpoint);
-
-    setStickPosition(FD_ROLL, -0.5f);
-    setStickPosition(FD_PITCH, 0.5f);
-    currentPidSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(-137.5, currentPidSetpoint);
-    currentPidSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(137.5, currentPidSetpoint);
-
     attitude.values.roll = -275;
     attitude.values.pitch = 275;
-    currentPidSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(0, currentPidSetpoint);
-    currentPidSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(0, currentPidSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpointRoll, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(242.76686, calculatedAngleSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpointPitch, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(-242.76686, calculatedAngleSetpoint);
 
     // Disable ANGLE_MODE
     disableFlightMode(ANGLE_MODE);
-    currentPidSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(0, currentPidSetpoint);
-    currentPidSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(0, currentPidSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpointRoll, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(393.44571, calculatedAngleSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpointPitch, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(-392.88422, calculatedAngleSetpoint);
 
     // Test level mode expo
     enableFlightMode(ANGLE_MODE);
     attitude.values.roll = 0;
     attitude.values.pitch = 0;
-    setStickPosition(FD_ROLL, 0.5f);
-    setStickPosition(FD_PITCH, -0.5f);
-    currentControlRateProfile->levelExpo[FD_ROLL] = 50;
-    currentControlRateProfile->levelExpo[FD_PITCH] = 26;
-    currentPidSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(85.9375, currentPidSetpoint);
-    currentPidSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpoint);
-    EXPECT_FLOAT_EQ(-110.6875, currentPidSetpoint);
+    currentPidSetpointRoll = 400;
+    currentPidSetpointPitch = -400;
+    // need to set some rates type and some expo here ??? HELP !!
+    calculatedAngleSetpoint = pidLevel(FD_ROLL, pidProfile, &angleTrim, currentPidSetpointRoll, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(231.55479, calculatedAngleSetpoint);
+    calculatedAngleSetpoint = pidLevel(FD_PITCH, pidProfile, &angleTrim, currentPidSetpointPitch, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(-231.55479, calculatedAngleSetpoint);
 }
 
 
-TEST(pidControllerTest, testPidHorizon) {
+TEST(pidControllerTest, testPidHorizon)
+{
     resetTest();
     ENABLE_ARMING_FLAG(ARMED);
     pidStabilisationState(PID_STABILISATION_ON);
     enableFlightMode(HORIZON_MODE);
 
-    // Test full stick response
-    setStickPosition(FD_ROLL, 1.0f);
-    setStickPosition(FD_PITCH, -1.0f);
-    EXPECT_FLOAT_EQ(0, calcHorizonLevelStrength());
+    // Test stick response greater than default limit of 0.75
+    setStickPosition(FD_ROLL, 0.76f);
+    setStickPosition(FD_PITCH, -0.76f);
+    EXPECT_FLOAT_EQ(0.0f, calcHorizonLevelStrength());
 
-    // Expect full rate output on full stick
-    // Test zero stick response
+    // Return sticks to center, should expect some levelling, but will be delayed
     setStickPosition(FD_ROLL, 0);
     setStickPosition(FD_PITCH, 0);
-    EXPECT_FLOAT_EQ(1, calcHorizonLevelStrength());
+    EXPECT_FLOAT_EQ(0.0078740157, calcHorizonLevelStrength());
 
-    // Test small stick response
+    // Test small stick response when flat, considering delay
     setStickPosition(FD_ROLL, 0.1f);
     setStickPosition(FD_PITCH, -0.1f);
-    EXPECT_NEAR(0.82, calcHorizonLevelStrength(), calculateTolerance(0.82));
+    EXPECT_NEAR(0.01457f, calcHorizonLevelStrength(), calculateTolerance(0.01457));
+
+    // Test larger stick response when flat
+    setStickPosition(FD_ROLL, 0.5f);
+    setStickPosition(FD_PITCH, -0.5f);
+    EXPECT_NEAR(0.0166, calcHorizonLevelStrength(), calculateTolerance(0.0166));
+
+    // set attitude of craft to 90 degrees
+    attitude.values.roll = 900;
+    attitude.values.pitch = 900;
+
+    // Test centered sticks at 90 degrees
+    setStickPosition(FD_ROLL, 0);
+    setStickPosition(FD_PITCH, 0);
+    // with gain of 50, and max angle of 135 deg, strength = 0.5 * (135-90) / 90 ie 0.5 * 45/136 or 0.5 * 0.333 = 0.166
+    EXPECT_NEAR(0.0193f, calcHorizonLevelStrength(), calculateTolerance(0.0193));
+
+    // Test small stick response at 90 degrees
+    setStickPosition(FD_ROLL, 0.1f);
+    setStickPosition(FD_PITCH, -0.1f);
+    EXPECT_NEAR(0.0213f, calcHorizonLevelStrength(), calculateTolerance(0.0213));
+
+    // Test larger stick response at 90 degrees
+    setStickPosition(FD_ROLL, 0.5f);
+    setStickPosition(FD_PITCH, -0.5f);
+    EXPECT_NEAR(0.0218f, calcHorizonLevelStrength(), calculateTolerance(0.0218));
+
+    // set attitude of craft to 120 degrees, inside limit of 135
+    attitude.values.roll = 1200;
+    attitude.values.pitch = 1200;
+
+    // Test centered sticks at 120 degrees
+    setStickPosition(FD_ROLL, 0);
+    setStickPosition(FD_PITCH, 0);
+    EXPECT_NEAR(0.0224f, calcHorizonLevelStrength(), calculateTolerance(0.0224));
+
+    // Test small stick response at 120 degrees
+    setStickPosition(FD_ROLL, 0.1f);
+    setStickPosition(FD_PITCH, -0.1f);
+    EXPECT_NEAR(0.0228f, calcHorizonLevelStrength(), calculateTolerance(0.0228));
+
+    // Test larger stick response at 120 degrees
+    setStickPosition(FD_ROLL, 0.5f);
+    setStickPosition(FD_PITCH, -0.5f);
+    EXPECT_NEAR(0.018f, calcHorizonLevelStrength(), calculateTolerance(0.018));
+
+    // set attitude of craft to 1500 degrees, outside limit of 135
+    attitude.values.roll = 1500;
+    attitude.values.pitch = 1500;
+
+    // Test centered sticks at 150 degrees - should be zero at any stick angle
+    setStickPosition(FD_ROLL, 0);
+    setStickPosition(FD_PITCH, 0);
+    EXPECT_NEAR(0.0f, calcHorizonLevelStrength(), calculateTolerance(0.0));
+
+    setStickPosition(FD_ROLL, 0.5f);
+    setStickPosition(FD_PITCH, -0.5f);
+    EXPECT_NEAR(0.0f, calcHorizonLevelStrength(), calculateTolerance(0.0));
+
 }
 
-TEST(pidControllerTest, testMixerSaturation) {
+// trying to fix
+
+
+
+TEST(pidControllerTest, testMixerSaturation)
+{
     resetTest();
+
     ENABLE_ARMING_FLAG(ARMED);
     pidStabilisationState(PID_STABILISATION_ON);
+
+    pidRuntime.itermLimit = 400;
+    pidRuntime.itermLimitYaw = 320;
 
     // Test full stick response
     setStickPosition(FD_ROLL, 1.0f);
     setStickPosition(FD_PITCH, -1.0f);
     setStickPosition(FD_YAW, 1.0f);
-    simulatedMotorMixRange = 2.0f;
     pidController(pidProfile, currentTestTime());
 
-    // Expect no iterm accumulation for yaw
-    EXPECT_FLOAT_EQ(150, pidData[FD_ROLL].I);
-    EXPECT_FLOAT_EQ(-150, pidData[FD_PITCH].I);
-    EXPECT_FLOAT_EQ(0, pidData[FD_YAW].I);
+    // Expect iterm accumulation for all axes because at this point, pidSum is not at limit
+    EXPECT_NEAR(156.2f, pidData[FD_ROLL].I, calculateTolerance(156.2f));
+    EXPECT_NEAR(-195.3f, pidData[FD_PITCH].I, calculateTolerance(-195.3f));
+    EXPECT_NEAR(7.0f, pidData[FD_YAW].I, calculateTolerance(7.0f));
 
-    // Test itermWindup limit (note: windup limit now only affects yaw)
-    // First store values without exceeding iterm windup limit
+     // ????? why such slow yaw iTerm growth ?? this is not what I see in the real logs == strange
+
+    // Check for iterm growth, should not reach limits yet
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(312.4f, pidData[FD_ROLL].I, calculateTolerance(312.4f));
+    EXPECT_NEAR(-390.6f, pidData[FD_PITCH].I, calculateTolerance(-390.6));
+    EXPECT_NEAR(21.1f, pidData[FD_YAW].I, calculateTolerance(21.1));
+
+    // Expect iterm  roll + pitch to stop at limit of 400
+    // yaw is still growing,
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(400.0f, pidData[FD_ROLL].I, calculateTolerance(400.0f));
+    EXPECT_NEAR(-400.0f, pidData[FD_PITCH].I, calculateTolerance(-400.0f));
+    EXPECT_NEAR(42.2f, pidData[FD_YAW].I, calculateTolerance(42.2f));
+
+    // run some more loops, check all iTerm values are at their limit
+    for (int loop = 0; loop < 7; loop++) {
+        pidController(pidProfile, currentTestTime());
+    }
+    EXPECT_NEAR(400, pidData[FD_ROLL].I, calculateTolerance(400));
+    EXPECT_NEAR(-400, pidData[FD_PITCH].I, calculateTolerance(-400));
+    EXPECT_NEAR(320, pidData[FD_YAW].I, calculateTolerance(320));
+
+    // Test that the added i term gain from Anti Gravity
+    // is also limited
     resetTest();
     ENABLE_ARMING_FLAG(ARMED);
     pidStabilisationState(PID_STABILISATION_ON);
-    setStickPosition(FD_ROLL, 0.1f);
-    setStickPosition(FD_PITCH, -0.1f);
-    setStickPosition(FD_YAW, 0.1f);
-    simulatedMotorMixRange = 0.0f;
-    pidController(pidProfile, currentTestTime());
-    float rollTestIterm = pidData[FD_ROLL].I;
-    float pitchTestIterm = pidData[FD_PITCH].I;
-    float yawTestIterm = pidData[FD_YAW].I;
+    pidRuntime.itermLimit = 400;
+    pidRuntime.itermLimitYaw = 320;
 
-    // Now compare values when exceeding the limit
+    setStickPosition(FD_ROLL, 1.0f);
+    setStickPosition(FD_PITCH, -1.0f);
+    setStickPosition(FD_YAW, 1.0f);
+    const bool prevAgState = pidRuntime.antiGravityEnabled;
+    const float prevAgTrhottleD = pidRuntime.antiGravityThrottleD;
+    pidRuntime.antiGravityEnabled = true;
+    pidRuntime.antiGravityThrottleD = 1.0;
+
+    pidController(pidProfile, currentTestTime());
+
+    // Expect more iterm accumulation than before on pitch and roll, no change on yaw
+    // without antigravity values were 156, 195, 7
+    EXPECT_NEAR(210.6, pidData[FD_ROLL].I, calculateTolerance(210.6f));
+    EXPECT_NEAR(-249.6f, pidData[FD_PITCH].I, calculateTolerance(-249.6f));
+    EXPECT_NEAR(7.0f, pidData[FD_YAW].I, calculateTolerance(7.0f));
+
+    // run again and should expect to hit the limit on pitch and roll but yaw unaffected
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(400, pidData[FD_ROLL].I, calculateTolerance(400));
+    EXPECT_NEAR(-400, pidData[FD_PITCH].I, calculateTolerance(-400));
+    EXPECT_NEAR(21.0f, pidData[FD_YAW].I, calculateTolerance(21.0f));
+
+    pidRuntime.antiGravityEnabled = prevAgState;
+    pidRuntime.antiGravityThrottleD = prevAgTrhottleD;
+
+    // Test that i term is limited on yaw at 320  when only yaw is saturated
+    resetTest();
+    ENABLE_ARMING_FLAG(ARMED);
+    pidRuntime.itermLimit = 400;
+    pidRuntime.itermLimitYaw = 320;
+
+    pidStabilisationState(PID_STABILISATION_ON);
+    setStickPosition(FD_ROLL, 0.0f);
+    setStickPosition(FD_PITCH, 0.0f);
+    setStickPosition(FD_YAW, 0.5f);
+
+    for (int loop = 0; loop < 7; loop++) {
+        pidController(pidProfile, currentTestTime());
+    }
+
+    EXPECT_NEAR(0, pidData[FD_ROLL].I, calculateTolerance(0));
+    EXPECT_NEAR(0, pidData[FD_PITCH].I, calculateTolerance(0));
+    EXPECT_NEAR(197, pidData[FD_YAW].I, calculateTolerance(197));
+
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(253, pidData[FD_YAW].I, calculateTolerance(320));
+
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(320, pidData[FD_YAW].I, calculateTolerance(320));
+
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(0, pidData[FD_ROLL].I, calculateTolerance(0));
+    EXPECT_NEAR(0, pidData[FD_PITCH].I, calculateTolerance(0));
+    EXPECT_NEAR(320, pidData[FD_YAW].I, calculateTolerance(320));
+}
+
+// #15910: During crash flip, the anti-gravity throttle filter does not get an input.
+// Thus, pidController() must not multiply antiGravityThrottleD by the gain on each loop.
+TEST(pidControllerTest, testAntiGravityNotCompoundedWhenFilterNotFed)
+{
     resetTest();
     ENABLE_ARMING_FLAG(ARMED);
     pidStabilisationState(PID_STABILISATION_ON);
-    setStickPosition(FD_ROLL, 0.1f);
-    setStickPosition(FD_PITCH, -0.1f);
-    setStickPosition(FD_YAW, 0.1f);
-    simulatedMotorMixRange = (pidProfile->itermWindupPointPercent + 1) / 100.0f;
+
+    const bool prevAgState = pidRuntime.antiGravityEnabled;
+    const uint8_t prevDebugMode = debugMode;
+    pidRuntime.antiGravityEnabled = true;
+    debugMode = DEBUG_ANTI_GRAVITY;
+    // A small filter output that remains after an earlier throttle movement
+    const float residualThrottleD = 0.1f;
+    pidRuntime.antiGravityThrottleD = residualThrottleD;
+
+    // A gyro error gives a P term that is not zero. Thus, the test uses the P boost.
+    gyro.gyroADCf[FD_ROLL] = 100;
+    gyro.gyroADCf[FD_PITCH] = -100;
+
     pidController(pidProfile, currentTestTime());
-    EXPECT_FLOAT_EQ(pidData[FD_ROLL].I, rollTestIterm);
-    EXPECT_FLOAT_EQ(pidData[FD_PITCH].I, pitchTestIterm);
-    EXPECT_LT(pidData[FD_YAW].I, yawTestIterm);
+    // The yaw loop sets itermAccelerator to zero. Thus, use the debug values of the I and P gain multipliers.
+    const int16_t expectedIGainMultiplier = debug[2];
+    const int16_t expectedPGainMultiplier = debug[3];
+    EXPECT_GT(expectedIGainMultiplier, 1000);
+    EXPECT_GT(expectedPGainMultiplier, 1000);
+
+    // If the filter does not write a new value, a scale in place with a gain of 10 gives inf in approximately 40 loops
+    for (int loop = 0; loop < 100; loop++) {
+        pidController(pidProfile, currentTestTime());
+    }
+
+    EXPECT_FLOAT_EQ(residualThrottleD, pidRuntime.antiGravityThrottleD);
+    EXPECT_EQ(expectedIGainMultiplier, debug[2]);
+    EXPECT_EQ(expectedPGainMultiplier, debug[3]);
+    for (int axis = FD_ROLL; axis <= FD_PITCH; axis++) {
+        EXPECT_TRUE(std::isfinite(pidData[axis].P));
+        EXPECT_TRUE(std::isfinite(pidData[axis].I));
+        EXPECT_TRUE(std::isfinite(pidData[axis].Sum));
+    }
+
+    pidRuntime.antiGravityEnabled = prevAgState;
+    debugMode = prevDebugMode;
+}
+
+TEST(pidControllerTest, testiTermWindup)
+{
+    resetTest();
+    ENABLE_ARMING_FLAG(ARMED);
+    // simulate the outcome with iterm_windup of 50
+    pidRuntime.itermLimit = 200;
+    pidRuntime.itermLimitYaw = 160;
+
+    pidStabilisationState(PID_STABILISATION_ON);
+    setStickPosition(FD_ROLL, 0.12f);
+    setStickPosition(FD_PITCH, 0.12f);
+    setStickPosition(FD_YAW, 0.12f);
+
+    for (int loop = 0; loop < 7; loop++) {
+        pidController(pidProfile, currentTestTime());
+    }
+
+    EXPECT_NEAR(131, pidData[FD_ROLL].I, calculateTolerance(131));
+    EXPECT_NEAR(164, pidData[FD_PITCH].I, calculateTolerance(164));
+    EXPECT_NEAR(126, pidData[FD_YAW].I, calculateTolerance(126));
+
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(150, pidData[FD_ROLL].I, calculateTolerance(150));
+    EXPECT_NEAR(200, pidData[FD_PITCH].I, calculateTolerance(200));
+    EXPECT_NEAR(137, pidData[FD_YAW].I, calculateTolerance(137));
+
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(169, pidData[FD_ROLL].I, calculateTolerance(200));
+    EXPECT_NEAR(200, pidData[FD_PITCH].I, calculateTolerance(200));
+    EXPECT_NEAR(160, pidData[FD_YAW].I, calculateTolerance(160));
+
+    pidController(pidProfile, currentTestTime());
+    EXPECT_NEAR(200, pidData[FD_ROLL].I, calculateTolerance(200));
+    EXPECT_NEAR(200, pidData[FD_PITCH].I, calculateTolerance(200));
+    EXPECT_NEAR(160, pidData[FD_YAW].I, calculateTolerance(320));
 }
 
 // TODO - Add more scenarios
-TEST(pidControllerTest, testCrashRecoveryMode) {
+TEST(pidControllerTest, testCrashRecoveryMode)
+{
     resetTest();
     pidProfile->crash_recovery = PID_CRASH_RECOVERY_ON;
     pidInit(pidProfile);
@@ -518,7 +797,10 @@ TEST(pidControllerTest, testCrashRecoveryMode) {
     // Add additional verifications
 }
 
-TEST(pidControllerTest, testFeedForward) {
+TEST(pidControllerTest, testFeedForward)
+// NOTE: THIS DOES NOT TEST THE FEEDFORWARD CALCULATIONS, which are now in rc.c, and return setpointDelta
+// This test only validates the feedforward value calculated in pid.c for a given simulated setpointDelta
+{
     resetTest();
     ENABLE_ARMING_FLAG(ARMED);
     pidStabilisationState(PID_STABILISATION_ON);
@@ -527,43 +809,89 @@ TEST(pidControllerTest, testFeedForward) {
     EXPECT_FLOAT_EQ(0, pidData[FD_PITCH].F);
     EXPECT_FLOAT_EQ(0, pidData[FD_YAW].F);
 
-    // Match the stick to gyro to stop error
+    // Move the sticks fully
     setStickPosition(FD_ROLL, 1.0f);
     setStickPosition(FD_PITCH, -1.0f);
     setStickPosition(FD_YAW, -1.0f);
 
     pidController(pidProfile, currentTestTime());
 
-    EXPECT_NEAR(2232.78, pidData[FD_ROLL].F, calculateTolerance(2232.78));
-    EXPECT_NEAR(-2061.03, pidData[FD_PITCH].F, calculateTolerance(-2061.03));
-    EXPECT_NEAR(-2061.03, pidData[FD_YAW].F, calculateTolerance(-2061.03));
+    EXPECT_NEAR(17.86, pidData[FD_ROLL].F, calculateTolerance(17.86));
+    EXPECT_NEAR(-16.49, pidData[FD_PITCH].F, calculateTolerance(-16.49));
+    EXPECT_NEAR(-16.49, pidData[FD_YAW].F, calculateTolerance(-16.49));
 
-    // Match the stick to gyro to stop error
+    // Bring sticks back to half way
     setStickPosition(FD_ROLL, 0.5f);
     setStickPosition(FD_PITCH, -0.5f);
     setStickPosition(FD_YAW, -0.5f);
 
     pidController(pidProfile, currentTestTime());
 
-    EXPECT_NEAR(-558.20, pidData[FD_ROLL].F, calculateTolerance(-558.20));
-    EXPECT_NEAR(515.26, pidData[FD_PITCH].F, calculateTolerance(515.26));
-    EXPECT_NEAR(515.26, pidData[FD_YAW].F, calculateTolerance(515.26));
+    EXPECT_NEAR(-8.93, pidData[FD_ROLL].F, calculateTolerance(-8.93));
+    EXPECT_NEAR(8.24, pidData[FD_PITCH].F, calculateTolerance(8.24));
+    EXPECT_NEAR(8.24, pidData[FD_YAW].F, calculateTolerance(8.24));
 
+    // Bring sticks back to two tenths out
+    setStickPosition(FD_ROLL, 0.2f);
+    setStickPosition(FD_PITCH, -0.2f);
+    setStickPosition(FD_YAW, -0.2f);
+
+    pidController(pidProfile, currentTestTime());
+
+    EXPECT_NEAR(-5.36, pidData[FD_ROLL].F, calculateTolerance(-5.36));
+    EXPECT_NEAR(4.95, pidData[FD_PITCH].F, calculateTolerance(4.95));
+    EXPECT_NEAR(4.95, pidData[FD_YAW].F, calculateTolerance(4.95));
+
+    // Bring sticks back to one tenth out, to give a difference of 0.1
+    setStickPosition(FD_ROLL, 0.1f);
+    setStickPosition(FD_PITCH, -0.1f);
+    setStickPosition(FD_YAW, -0.1f);
+
+    pidController(pidProfile, currentTestTime());
+
+    EXPECT_NEAR(-1.79, pidData[FD_ROLL].F, calculateTolerance(-1.79));
+    EXPECT_NEAR(1.65, pidData[FD_PITCH].F, calculateTolerance(1.65));
+    EXPECT_NEAR(1.65, pidData[FD_YAW].F, calculateTolerance(1.65));
+
+    // Center the sticks, giving the same delta value as before, should return the same feedforward
     setStickPosition(FD_ROLL, 0.0f);
     setStickPosition(FD_PITCH, 0.0f);
     setStickPosition(FD_YAW, 0.0f);
 
-    for (int loop = 0; loop <= 15; loop++) {
-        gyro.gyroADCf[FD_ROLL] += gyro.gyroADCf[FD_ROLL];
-        pidController(pidProfile, currentTestTime());
-    }
+    pidController(pidProfile, currentTestTime());
+
+    EXPECT_NEAR(-1.79, pidData[FD_ROLL].F, calculateTolerance(-1.79));
+    EXPECT_NEAR(1.65, pidData[FD_PITCH].F, calculateTolerance(1.65));
+    EXPECT_NEAR(1.65, pidData[FD_YAW].F, calculateTolerance(1.65));
+
+    // Keep centered
+    setStickPosition(FD_ROLL, 0.0f);
+    setStickPosition(FD_PITCH, 0.0f);
+    setStickPosition(FD_YAW, 0.0f);
+
+    pidController(pidProfile, currentTestTime());
 
     EXPECT_FLOAT_EQ(0, pidData[FD_ROLL].F);
     EXPECT_FLOAT_EQ(0, pidData[FD_PITCH].F);
     EXPECT_FLOAT_EQ(0, pidData[FD_YAW].F);
 }
 
-TEST(pidControllerTest, testItermRelax) {
+// pidInit() runs from readEEPROM() before rxInit(), so the CRSF check must not depend on rx runtime state
+TEST(pidControllerTest, testFeedforwardInterpolateFollowsRxConfig)
+{
+    resetTest();
+
+    rxConfigMutable()->serialrx_provider = SERIALRX_CRSF;
+    pidInit(pidProfile);
+    EXPECT_FALSE(pidRuntime.feedforwardInterpolate);
+
+    rxConfigMutable()->serialrx_provider = SERIALRX_SBUS;
+    pidInit(pidProfile);
+    EXPECT_TRUE(pidRuntime.feedforwardInterpolate);
+}
+
+TEST(pidControllerTest, testItermRelax)
+{
     resetTest();
     pidProfile->iterm_relax = ITERM_RELAX_RP;
     ENABLE_ARMING_FLAG(ARMED);
@@ -637,39 +965,13 @@ TEST(pidControllerTest, testItermRelax) {
 }
 
 // TODO - Add more tests
-TEST(pidControllerTest, testAbsoluteControl) {
-    resetTest();
-    pidProfile->abs_control_gain = 10;
-    pidInit(pidProfile);
-    ENABLE_ARMING_FLAG(ARMED);
-    pidStabilisationState(PID_STABILISATION_ON);
-
-    float gyroRate = 0;
-
-    float itermErrorRate = 10;
-    float currentPidSetpoint = 10;
-
-    applyAbsoluteControl(FD_PITCH, gyroRate, &currentPidSetpoint, &itermErrorRate);
-
-    EXPECT_NEAR(10.8, itermErrorRate, calculateTolerance(10.8));
-    EXPECT_NEAR(10.8, currentPidSetpoint, calculateTolerance(10.8));
-
-    applyAbsoluteControl(FD_PITCH, gyroRate, &currentPidSetpoint, &itermErrorRate);
-    EXPECT_NEAR(10.8, itermErrorRate, calculateTolerance(10.8));
-    EXPECT_NEAR(10.8, currentPidSetpoint, calculateTolerance(10.8));
-
-    gyroRate = -53;
-    axisError[FD_PITCH] = -60;
-    applyAbsoluteControl(FD_PITCH, gyroRate, &currentPidSetpoint, &itermErrorRate);
-    EXPECT_NEAR(-79.2, itermErrorRate, calculateTolerance(-79.2));
-    EXPECT_NEAR(-79.2, currentPidSetpoint, calculateTolerance(-79.2));
-}
-
-TEST(pidControllerTest, testDtermFiltering) {
+TEST(pidControllerTest, testDtermFiltering)
+{
 // TODO
 }
 
-TEST(pidControllerTest, testItermRotationHandling) {
+TEST(pidControllerTest, testItermRotationHandling)
+{
     resetTest();
     pidInit(pidProfile);
 
@@ -695,23 +997,20 @@ TEST(pidControllerTest, testItermRotationHandling) {
     EXPECT_NEAR(860.37, pidData[FD_PITCH].I, calculateTolerance(860.37));
     EXPECT_NEAR(1139.6, pidData[FD_YAW].I, calculateTolerance(1139.6));
 
-    pidProfile->abs_control_gain = 10;
     pidInit(pidProfile);
     pidData[FD_ROLL].I = 10;
     pidData[FD_PITCH].I = 1000;
     pidData[FD_YAW].I = 1000;
 
     gyro.gyroADCf[FD_ROLL] = -1000;
-    // FIXME - axisError changes don't affect the system. This is a potential bug or intendend behaviour?
-    axisError[FD_PITCH] = 1000;
-    axisError[FD_YAW] = 1000;
     rotateItermAndAxisError();
     EXPECT_FLOAT_EQ(pidData[FD_ROLL].I, 10);
     EXPECT_NEAR(860.37, pidData[FD_PITCH].I, calculateTolerance(860.37));
     EXPECT_NEAR(1139.6, pidData[FD_YAW].I, calculateTolerance(1139.6));
 }
 
-TEST(pidControllerTest, testLaunchControl) {
+TEST(pidControllerTest, testLaunchControl)
+{
     // The launchControlGain is indirectly tested since when launch control is active the
     // the gain overrides the PID settings. If the logic to use launchControlGain wasn't
     // working then any I calculations would be incorrect.
@@ -824,4 +1123,232 @@ TEST(pidControllerTest, testLaunchControl) {
     EXPECT_NEAR(-1.56,  pidData[FD_PITCH].I, calculateTolerance(-1.56));
     EXPECT_NEAR(44.84,  pidData[FD_YAW].P,   calculateTolerance(44.84));
     EXPECT_NEAR(1.56,   pidData[FD_YAW].I,  calculateTolerance(1.56));
+}
+
+TEST(pidControllerTest, testTpaClassic)
+{
+    resetTest();
+
+    pidProfile->tpa_curve_type = TPA_CURVE_CLASSIC;
+    pidProfile->tpa_rate = 30;
+    pidProfile->tpa_breakpoint = 1600;
+    pidProfile->tpa_low_rate = -50;
+    pidProfile->tpa_low_breakpoint = 1200;
+    pidProfile->tpa_low_always = 1;
+
+    pidInit(pidProfile);
+
+    pidUpdateTpaFactor(0.0f);
+    EXPECT_FLOAT_EQ(1.5f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.1f);
+    EXPECT_FLOAT_EQ(1.25f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.2f);
+    EXPECT_FLOAT_EQ(1.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.6f);
+    EXPECT_FLOAT_EQ(1.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.8f);
+    EXPECT_FLOAT_EQ(0.85f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(1.0f);
+    EXPECT_FLOAT_EQ(0.7f, pidRuntime.tpaFactor);
+
+
+    pidProfile->tpa_curve_type = TPA_CURVE_CLASSIC;
+    pidProfile->tpa_rate = 30;
+    pidProfile->tpa_breakpoint = 1600;
+    pidProfile->tpa_low_rate = -50;
+    pidProfile->tpa_low_breakpoint = 1000;
+    pidProfile->tpa_low_always = 1;
+
+    pidInit(pidProfile);
+
+    pidUpdateTpaFactor(0.0f);
+    EXPECT_FLOAT_EQ(1.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.1f);
+    EXPECT_FLOAT_EQ(1.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.2f);
+    EXPECT_FLOAT_EQ(1.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.6f);
+    EXPECT_FLOAT_EQ(1.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.8f);
+    EXPECT_FLOAT_EQ(0.85f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(1.0f);
+    EXPECT_FLOAT_EQ(0.7f, pidRuntime.tpaFactor);
+}
+
+TEST(pidControllerTest, testTpaHyperbolic)
+{
+    resetTest();
+
+    // curve sligly down - edge case where internal expo -> inf
+    pidProfile->tpa_curve_type = TPA_CURVE_HYPERBOLIC;
+    pidProfile->tpa_curve_pid_thr100 = 50;
+    pidProfile->tpa_curve_pid_thr0 = 500;
+    pidProfile->tpa_curve_expo = 10;
+    pidProfile->tpa_curve_stall_throttle = 30;
+
+    pidInit(pidProfile);
+
+    pidUpdateTpaFactor(0.0f);
+    EXPECT_FLOAT_EQ(5.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.15f);
+    EXPECT_FLOAT_EQ(5.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.5);
+    EXPECT_NEAR(2.588f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.9);
+    EXPECT_NEAR(0.693f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(1.0);
+    EXPECT_NEAR(0.5f, pidRuntime.tpaFactor, 0.01f);
+
+    // linear curve
+    pidProfile->tpa_curve_type = TPA_CURVE_HYPERBOLIC;
+    pidProfile->tpa_curve_pid_thr100 = 10;
+    pidProfile->tpa_curve_pid_thr0 = 300;
+    pidProfile->tpa_curve_expo = 0;
+    pidProfile->tpa_curve_stall_throttle = 0;
+
+    pidInit(pidProfile);
+
+    pidUpdateTpaFactor(0.0f);
+    EXPECT_FLOAT_EQ(3.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.15f);
+    EXPECT_NEAR(2.565f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.5);
+    EXPECT_NEAR(1.550f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.9);
+    EXPECT_NEAR(0.390f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(1.0);
+    EXPECT_NEAR(0.1f, pidRuntime.tpaFactor, 0.01f);
+
+    // curve bends up
+    pidProfile->tpa_curve_type = TPA_CURVE_HYPERBOLIC;
+    pidProfile->tpa_curve_pid_thr100 = 60;
+    pidProfile->tpa_curve_pid_thr0 = 1000;
+    pidProfile->tpa_curve_expo = -50;
+    pidProfile->tpa_curve_stall_throttle = 40;
+
+    pidInit(pidProfile);
+
+    pidUpdateTpaFactor(0.0f);
+    EXPECT_FLOAT_EQ(10.0f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.15f);
+    EXPECT_NEAR(10.0f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.5);
+    EXPECT_NEAR(9.700f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.9);
+    EXPECT_NEAR(7.364f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(1.0);
+    EXPECT_NEAR(0.625f, pidRuntime.tpaFactor, 0.01f);
+
+    // curve bends down
+    pidProfile->tpa_curve_type = TPA_CURVE_HYPERBOLIC;
+    pidProfile->tpa_curve_pid_thr100 = 90;
+    pidProfile->tpa_curve_pid_thr0 = 250;
+    pidProfile->tpa_curve_expo = 60;
+    pidProfile->tpa_curve_stall_throttle = 60;
+
+    pidInit(pidProfile);
+
+    pidUpdateTpaFactor(0.0f);
+    EXPECT_FLOAT_EQ(2.5f, pidRuntime.tpaFactor);
+
+    pidUpdateTpaFactor(0.15f);
+    EXPECT_NEAR(2.5f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.5);
+    EXPECT_NEAR(2.5f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(0.9);
+    EXPECT_NEAR(0.954f, pidRuntime.tpaFactor, 0.01f);
+
+    pidUpdateTpaFactor(1.0);
+    EXPECT_NEAR(0.9f, pidRuntime.tpaFactor, 0.01f);
+}
+
+static int runImpact(float jerkMagnitude)
+{
+    disarmCount = 0;
+    simulatedThrottleRaised = true;
+    acc.jerkMagnitude = jerkMagnitude;
+    pidController(pidProfile, currentTestTime());
+    acc.jerkMagnitude = 0.0f;
+    return disarmCount;
+}
+
+TEST(pidControllerTest, testAutoLandingImpactDisarm)
+{
+    resetTest();
+    pidProfile->landing_disarm_threshold = 0;
+    pidInit(pidProfile);
+    ENABLE_ARMING_FLAG(ARMED);
+    pidStabilisationState(PID_STABILISATION_ON);
+
+    // EZ disarm stays opt-in for manual flight
+    simulatedMaxRcDeflectionAbs = 0.0f;
+    simulatedMixerGetRcThrottle = 0.0f;
+    simulatedBelowLandingAltitude = true;
+    EXPECT_EQ(0, runImpact(2000.0f));
+
+    // nor in an autopilot mode that is not landing, such as a rescue climbing out
+    ENABLE_FLIGHT_MODE(GPS_RESCUE_MODE);
+    EXPECT_EQ(0, runImpact(2000.0f));
+
+    // touching down in an autopilot landing disarms by default
+    simulatedAutopilotLanding = true;
+    EXPECT_EQ(1, runImpact(2000.0f));
+
+    // but not on acc noise, nor above the landing altitude
+    EXPECT_EQ(0, runImpact(150.0f));
+    simulatedBelowLandingAltitude = false;
+    EXPECT_EQ(0, runImpact(2000.0f));
+    simulatedBelowLandingAltitude = true;
+
+    // nor under a nav mode outside alt hold and rescue, with the throttle stick left up
+    DISABLE_FLIGHT_MODE(GPS_RESCUE_MODE);
+    simulatedMixerGetRcThrottle = 0.5f;
+    simulatedMaxRcDeflectionAbs = 0.3f;
+    EXPECT_EQ(1, runImpact(2000.0f));
+    simulatedAutopilotLanding = false;
+    EXPECT_EQ(0, runImpact(2000.0f));
+    simulatedAutopilotLanding = true;
+    simulatedMixerGetRcThrottle = 0.0f;
+    simulatedMaxRcDeflectionAbs = 0.0f;
+    ENABLE_FLIGHT_MODE(GPS_RESCUE_MODE);
+
+    // not for a wing
+    simulatedFixedWing = true;
+    EXPECT_EQ(0, runImpact(2000.0f));
+    simulatedFixedWing = false;
+
+    // a user threshold still takes precedence
+    pidProfile->landing_disarm_threshold = 250;
+    pidInit(pidProfile);
+    EXPECT_EQ(0, runImpact(1000.0f));
+    EXPECT_EQ(1, runImpact(2000.0f));
+
+    // and gets the landing sensitivity only while landing, not in a rescue flying home below the takeoff point
+    simulatedAutopilotLanding = false;
+    EXPECT_EQ(0, runImpact(2000.0f));
+    EXPECT_EQ(1, runImpact(3000.0f));
 }

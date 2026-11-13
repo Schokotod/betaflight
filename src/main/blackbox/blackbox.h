@@ -29,7 +29,8 @@ typedef enum BlackboxDevice {
     BLACKBOX_DEVICE_NONE = 0,
     BLACKBOX_DEVICE_FLASH = 1,
     BLACKBOX_DEVICE_SDCARD = 2,
-    BLACKBOX_DEVICE_SERIAL = 3
+    BLACKBOX_DEVICE_SERIAL = 3,
+    BLACKBOX_DEVICE_VIRTUAL = 4,
 } BlackboxDevice_e;
 
 typedef enum BlackboxMode {
@@ -58,11 +59,18 @@ typedef enum FlightLogEvent {
     FLIGHT_LOG_EVENT_LOG_END = 255
 } FlightLogEvent;
 
+// Highest selectable blackbox_sample_rate; matches the last entry of
+// lookupTableBlackboxSampleRate ("1/16") in cli/settings.c
+#define BLACKBOX_SAMPLE_RATE_MAX 4
+
 typedef struct blackboxConfig_s {
+    uint32_t fields_disabled_mask;
     uint8_t sample_rate; // sample rate
     uint8_t device;
-    uint32_t fields_disabled_mask;
     uint8_t mode;
+    uint8_t high_resolution;
+    int8_t blackbox_uart;  // serialPortIdentifier_e; SERIAL_PORT_NONE = unassigned
+    uint8_t blackbox_baud; // baudRate_e index for blackbox_uart
 } blackboxConfig_t;
 
 PG_DECLARE(blackboxConfig_t, blackboxConfig);

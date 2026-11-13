@@ -29,6 +29,7 @@ extern "C" {
     #include "blackbox/blackbox_io.h"
 
     #include "common/time.h"
+    #include "common/vector.h"
 
     #include "config/config.h"
     #include "config/feature.h"
@@ -54,8 +55,10 @@ extern "C" {
     #include "osd/osd_elements.h"
     #include "osd/osd_warnings.h"
 
+    #include "pg/gps_rescue.h"
     #include "pg/pg.h"
     #include "pg/pg_ids.h"
+    #include "pg/pilot.h"
     #include "pg/rx.h"
 
     #include "sensors/acceleration.h"
@@ -69,7 +72,7 @@ extern "C" {
 
     uint16_t rssi;
     attitudeEulerAngles_t attitude;
-    float rMat[3][3];
+    matrix33_t rMat;
 
     pidProfile_t *currentPidProfile;
     int16_t debug[DEBUG16_VALUE_COUNT];
@@ -85,22 +88,25 @@ extern "C" {
     linkQualitySource_e linkQualitySource;
 
     acc_t acc;
-    float accAverage[XYZ_AXIS_COUNT];
 
     PG_REGISTER(batteryConfig_t, batteryConfig, PG_BATTERY_CONFIG, 0);
+    PG_REGISTER_ARRAY(batteryProfile_t, BATTERY_PROFILE_COUNT, batteryProfiles, PG_BATTERY_PROFILES, 0);
+    const batteryProfile_t *currentBatteryProfile;
     PG_REGISTER(blackboxConfig_t, blackboxConfig, PG_BLACKBOX_CONFIG, 0);
     PG_REGISTER(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 0);
     PG_REGISTER(pilotConfig_t, pilotConfig, PG_PILOT_CONFIG, 0);
     PG_REGISTER(gpsRescueConfig_t, gpsRescueConfig, PG_GPS_RESCUE, 0);
     PG_REGISTER(imuConfig_t, imuConfig, PG_IMU_CONFIG, 0);
     PG_REGISTER(gpsConfig_t, gpsConfig, PG_GPS_CONFIG, 0);
-    
+
     timeUs_t simulationTime = 0;
     batteryState_e simulationBatteryState;
     uint8_t simulationBatteryCellCount;
     uint16_t simulationBatteryVoltage;
-    uint32_t simulationBatteryAmperage;
+    uint8_t simulationBatteryPercentage;
+    int32_t simulationBatteryAmperage;
     uint32_t simulationMahDrawn;
+    float simulationWhDrawn;
     int32_t simulationAltitude;
     int32_t simulationVerticalSpeed;
     uint16_t simulationCoreTemperature;
@@ -119,22 +125,28 @@ void setDefaultSimulationState()
 {
     memset(osdElementConfigMutable(), 0, sizeof(osdElementConfig_t));
 
+    rtcTime_t rtcTime = simulationTime / 1000;
+    rtcSet(&rtcTime);
+
     osdConfigMutable()->enabled_stats = 0;
     osdConfigMutable()->framerate_hz = 12;
+    timeConfigMutable()->tz_offsetMinutes = 0;
 
     rssi = 1024;
 
     simulationBatteryState = BATTERY_OK;
     simulationBatteryCellCount = 4;
     simulationBatteryVoltage = 1680;
+    simulationBatteryPercentage = 100;
     simulationBatteryAmperage = 0;
     simulationMahDrawn = 0;
+    simulationWhDrawn = 0;
     simulationAltitude = 0;
     simulationVerticalSpeed = 0;
     simulationCoreTemperature = 0;
     simulationGpsHealthy = false;
 
-    rcData[PITCH] = 1500;
+    rcData[PITCH] = rcUsToNorm(1500);
 
     osdFlyTime = 0;
 
@@ -166,7 +178,7 @@ void doTestArm(bool testEmpty = true)
 
     // then
     // arming alert displayed
-    displayPortTestBufferSubstring(12, 7, "ARMED");
+    displayPortTestBufferSubstring(13, 8, "ARMED");
 
     // given
     // armed alert times out (0.5 seconds)
@@ -189,7 +201,8 @@ void doTestArm(bool testEmpty = true)
 /*
  * Auxiliary function. Test is there're stats that must be shown
  */
-bool isSomeStatEnabled(void) {
+bool isSomeStatEnabled(void)
+{
     return (osdConfigMutable()->enabled_stats != 0);
 }
 
@@ -217,7 +230,7 @@ void doTestDisarm()
            enabledStats >>= 1;
         }
 
-        displayPortTestBufferSubstring(2, 7 - count / 2, "  --- STATS ---");
+        displayPortTestBufferSubstring(9, 7 - count / 2, "--- STATS ---");
     }
 }
 
@@ -324,6 +337,12 @@ protected:
 
     virtual void SetUp() {
         setDefaultSimulationState();
+        batteryProfilesMutable(0)->vbatmincellvoltage = 330;
+        batteryProfilesMutable(0)->vbatmaxcellvoltage = 430;
+        batteryProfilesMutable(0)->vbatfullcellvoltage = 410;
+        batteryProfilesMutable(0)->batteryCapacity = 0;
+        currentBatteryProfile = batteryProfiles(0);
+        osdConfigMutable()->cap_alarm = 2200;
     }
 
     virtual void TearDown() {
@@ -349,8 +368,9 @@ TEST_F(OsdTest, TestInit)
 
     // and
     // this battery configuration (used for battery voltage elements)
-    batteryConfigMutable()->vbatmincellvoltage = 330;
-    batteryConfigMutable()->vbatmaxcellvoltage = 430;
+    batteryProfilesMutable(0)->vbatmincellvoltage = 330;
+    batteryProfilesMutable(0)->vbatmaxcellvoltage = 430;
+    currentBatteryProfile = batteryProfiles(0);
 
     // when
     // OSD is initialised
@@ -360,9 +380,9 @@ TEST_F(OsdTest, TestInit)
 
     // then
     // display buffer should contain splash screen
-    displayPortTestBufferSubstring(7, 8, "MENU:THR MID");
-    displayPortTestBufferSubstring(11, 9, "+ YAW LEFT");
-    displayPortTestBufferSubstring(11, 10, "+ PITCH UP");
+    displayPortTestBufferSubstring(7, 10, "MENU:THR MID");
+    displayPortTestBufferSubstring(11, 11, "+ YAW LEFT");
+    displayPortTestBufferSubstring(11, 12, "+ PITCH UP");
 
     // when
     // splash screen timeout has elapsed
@@ -433,7 +453,7 @@ TEST_F(OsdTest, TestDisarmWithDismissStats)
 
     // given
     // sticks have been moved
-    rcData[PITCH] = 1800;
+    rcData[PITCH] = rcUsToNorm(1800);
 
     // when
     // sufficient OSD updates have been called
@@ -507,8 +527,45 @@ TEST_F(OsdTest, TestStatsTiming)
     // statistics screen should display the following
     int row = 7;
     displayPortTestBufferSubstring(2, row++, "2017-11-19 10:12:");
-    displayPortTestBufferSubstring(2, row++, "TOTAL ARM         : 00:13.61");
+    displayPortTestBufferSubstring(2, row++, "TOTAL ARM         : 00:13.60");
     displayPortTestBufferSubstring(2, row++, "LAST ARM          : 00:01");
+}
+
+TEST_F(OsdTest, TestRtcDateTimeVariantsUseTimezoneOffset)
+{
+    // given
+    // this RTC time and timezone offset
+    dateTime_t dateTime;
+    dateTime.year = 2026;
+    dateTime.month = 5;
+    dateTime.day = 30;
+    dateTime.hours = 22;
+    dateTime.minutes = 30;
+    dateTime.seconds = 15;
+    dateTime.millis = 0;
+    rtcSetDateTime(&dateTime);
+    timeConfigMutable()->tz_offsetMinutes = 120;
+
+    // when
+    // the short date/time variant is formatted
+    char buffer[FORMATTED_DATE_TIME_BUFSIZE];
+    osdSetActiveElementTypeForTest(OSD_ELEMENT_TYPE_2);
+    EXPECT_TRUE(osdFormatRtcDateTime(buffer));
+
+    // then
+    // the short date/time variant uses local time
+    EXPECT_STREQ("05.31 00:30", buffer);
+
+    // when
+    // the time-only variant is formatted
+    osdSetActiveElementTypeForTest(OSD_ELEMENT_TYPE_3);
+    EXPECT_TRUE(osdFormatRtcDateTime(buffer));
+
+    // then
+    // the time-only variant uses local time
+    EXPECT_STREQ("00:30:15", buffer);
+
+    osdSetActiveElementTypeForTest(OSD_ELEMENT_TYPE_1);
 }
 
 /*
@@ -731,6 +788,30 @@ TEST_F(OsdTest, TestAlarms)
     }
 }
 
+TEST_F(OsdTest, TestCapacityAlarmUsesLegacyOsdAlarmWhenProfileCapacityIsUnset)
+{
+    // given
+    batteryProfilesMutable(0)->batteryCapacity = 0;
+    osdConfigMutable()->cap_alarm = 1800;
+
+    // then
+    EXPECT_EQ(1800, osdGetCapacityAlarm());
+}
+
+TEST_F(OsdTest, TestCapacityAlarmUsesCurrentBatteryProfileCapacity)
+{
+    // given
+    osdConfigMutable()->cap_alarm = 2200;
+    batteryProfilesMutable(0)->batteryCapacity = 1300;
+    batteryProfilesMutable(1)->batteryCapacity = 3000;
+    currentBatteryProfile = batteryProfiles(1);
+
+    // then
+    EXPECT_EQ(3000, osdGetCapacityAlarm());
+    currentBatteryProfile = batteryProfiles(0);
+    batteryProfilesMutable(1)->batteryCapacity = 0;
+}
+
 /*
  * Tests the RSSI OSD element.
  */
@@ -768,6 +849,35 @@ TEST_F(OsdTest, TestElementRssi)
 }
 
 /*
+ * osd_rssi_alarm is settable up to 100 (settings.c). getRssiPercent() is clamped to 99 before
+ * being written to the display buffer, but the alarm severity must be evaluated against the raw,
+ * unclamped percentage -- otherwise a perfect 100% signal with rssi_alarm=100 spuriously reads
+ * as critical, because the clamped 99 always fails "< 100".
+ */
+TEST_F(OsdTest, TestElementRssiAlarmSeverity)
+{
+    // given
+    const uint8_t previousRssiAlarm = osdConfig()->rssi_alarm;
+    osdElementConfigMutable()->item_pos[OSD_RSSI_VALUE] = OSD_POS(8, 1) | OSD_PROFILE_1_FLAG;
+    osdConfigMutable()->rssi_alarm = 100;
+
+    osdAnalyzeActiveElements();
+
+    // when: true RSSI is a perfect 100%, alarm threshold is also the max (100)
+    rssi = 1023;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+
+    // then: display clamps to 99 for formatting, but the alarm must not fire at a perfect signal
+    displayPortTestBufferSubstring(8, 1, "%c99", SYM_RSSI);
+    displayPortTestBufferAttrNoBits(8, 1, DISPLAYPORT_SEVERITY_CRITICAL);
+
+    // cleanup: OsdTest::SetUp() does not reset rssi_alarm -- restore it so this test's value
+    // doesn't leak into a later test that assumes a default.
+    osdConfigMutable()->rssi_alarm = previousRssiAlarm;
+}
+
+/*
  * Tests the instantaneous battery current OSD element.
  */
 TEST_F(OsdTest, TestElementAmperage)
@@ -800,6 +910,30 @@ TEST_F(OsdTest, TestElementAmperage)
 
     // then
     displayPortTestBufferSubstring(1, 12, "123.45%c", SYM_AMP);
+
+    // when
+    simulationBatteryAmperage = -156;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+
+    // then
+    displayPortTestBufferSubstring(1, 12, " -1.56%c", SYM_AMP);
+
+    // when
+    simulationBatteryAmperage = -2156;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+
+    // then
+    displayPortTestBufferSubstring(1, 12, "-21.56%c", SYM_AMP);
+
+    // when
+    simulationBatteryAmperage = -12345;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+
+    // then
+    displayPortTestBufferSubstring(1, 12, "-123.45%c", SYM_AMP);
 }
 
 /*
@@ -1040,7 +1174,7 @@ TEST_F(OsdTest, TestElementWarningsBattery)
     osdAnalyzeActiveElements();
 
     // and
-    batteryConfigMutable()->vbatfullcellvoltage = 410;
+    batteryProfilesMutable(0)->vbatfullcellvoltage = 410;
 
     // and
     // 4S battery
@@ -1048,7 +1182,7 @@ TEST_F(OsdTest, TestElementWarningsBattery)
 
     // and
     // used battery
-    simulationBatteryVoltage = ((batteryConfig()->vbatmaxcellvoltage - 20) * simulationBatteryCellCount) - 1;
+    simulationBatteryVoltage = ((currentBatteryProfile->vbatmaxcellvoltage - 20) * simulationBatteryCellCount) - 1;
     simulationBatteryState = BATTERY_OK;
 
     // when
@@ -1107,7 +1241,7 @@ TEST_F(OsdTest, TestElementWarningsBattery)
 
     // given
     // full battery
-    simulationBatteryVoltage = ((batteryConfig()->vbatmaxcellvoltage - 20) * simulationBatteryCellCount);
+    simulationBatteryVoltage = ((currentBatteryProfile->vbatmaxcellvoltage - 20) * simulationBatteryCellCount);
     simulationBatteryState = BATTERY_OK;
 
     // when
@@ -1194,7 +1328,7 @@ TEST_F(OsdTest, TestGpsElements)
 
     sensorsSet(SENSOR_GPS);
     osdAnalyzeActiveElements();
-    
+
     // when
     simulationGpsHealthy = false;
     gpsSol.numSat = 0;
@@ -1261,6 +1395,196 @@ TEST_F(OsdTest, TestGpsElements)
     }
 }
 
+TEST_F(OsdTest, TestHdPositioning)
+{
+    // given
+    // Try to round-trip the OSD_POS macro with an "HD location"
+    osdElementConfigMutable()->item_pos[OSD_RSSI_VALUE] = OSD_POS(53, 0) | OSD_PROFILE_1_FLAG;
+    osdConfigMutable()->rssi_alarm = 0;
+    // Also try to round-trip a raw value matching one generated by the Configurator.
+    osdElementConfigMutable()->item_pos[OSD_CURRENT_DRAW] = 3125 | OSD_PROFILE_1_FLAG;
+
+    osdAnalyzeActiveElements();
+
+    // when
+    simulationBatteryAmperage = 0;
+    rssi = 1024;
+
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+
+    // then
+    displayPortTestBufferSubstring(53, 0, "%c99", SYM_RSSI);
+    displayPortTestBufferSubstring(53, 1, "  0.00%c", SYM_AMP);
+}
+
+TEST_F(OsdTest, TestBatteryUsageCapacityZero)
+{
+    batteryProfilesMutable(0)->batteryCapacity = 0;
+    osdConfigMutable()->cap_alarm = 0;
+
+    // TYPE 3
+    osdElementConfigMutable()->item_pos[OSD_MAIN_BATT_USAGE] =
+        OSD_POS(2, 1) | OSD_PROFILE_1_FLAG | (OSD_ELEMENT_TYPE_3 << 14);
+    osdAnalyzeActiveElements();
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 0;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1, "%c0%%", SYM_MAH);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 42;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1, "%c42%%", SYM_MAH);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 100;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1, "%c100%%", SYM_MAH);
+
+    // TYPE 4
+    osdElementConfigMutable()->item_pos[OSD_MAIN_BATT_USAGE] =
+        OSD_POS(2, 1) | OSD_PROFILE_1_FLAG | (OSD_ELEMENT_TYPE_4 << 14);
+    osdAnalyzeActiveElements();
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 0;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1, "%c100%%", SYM_MAH);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 42;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1, "%c58%%", SYM_MAH);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 100;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1, "%c0%%", SYM_MAH);
+
+    // TYPE 1
+    osdElementConfigMutable()->item_pos[OSD_MAIN_BATT_USAGE] =
+        OSD_POS(2, 1) | OSD_PROFILE_1_FLAG | (OSD_ELEMENT_TYPE_1 << 14);
+    osdAnalyzeActiveElements();
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 0;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1,
+        "%c%c%c%c%c%c%c%c%c%c%c%c",
+        SYM_PB_START,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 42;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1,
+        "%c%c%c%c%c%c%c%c%c%c%c%c",
+        SYM_PB_START,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_END,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 100;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1,
+        "%c%c%c%c%c%c%c%c%c%c%c%c",
+        SYM_PB_START,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL);
+
+    // TYPE 2
+    osdElementConfigMutable()->item_pos[OSD_MAIN_BATT_USAGE] =
+        OSD_POS(2, 1) | OSD_PROFILE_1_FLAG | (OSD_ELEMENT_TYPE_2 << 14);
+    osdAnalyzeActiveElements();
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 0;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1,
+        "%c%c%c%c%c%c%c%c%c%c%c%c",
+        SYM_PB_START,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 42;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1,
+        "%c%c%c%c%c%c%c%c%c%c%c%c",
+        SYM_PB_START,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_FULL,
+        SYM_PB_HALF,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY);
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    simulationBatteryPercentage = 100;
+    osdRefresh();
+    displayPortTestBufferSubstring(2, 1,
+        "%c%c%c%c%c%c%c%c%c%c%c%c",
+        SYM_PB_START,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY,
+        SYM_PB_EMPTY);
+
+    // ATTR
+    simulationMahDrawn = 999999;
+    simulationBatteryState = BATTERY_OK;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+    displayPortTestBufferAttrNoBits(2, 1, DISPLAYPORT_SEVERITY_WARNING | DISPLAYPORT_SEVERITY_CRITICAL);
+    simulationBatteryState = BATTERY_WARNING;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+    displayPortTestBufferAttrBits(2, 1, DISPLAYPORT_SEVERITY_WARNING);
+    simulationBatteryState = BATTERY_CRITICAL;
+    displayClearScreen(&testDisplayPort, DISPLAY_CLEAR_WAIT);
+    osdRefresh();
+    displayPortTestBufferAttrBits(2, 1, DISPLAYPORT_SEVERITY_CRITICAL);
+}
+
 // STUBS
 extern "C" {
     bool featureIsEnabled(uint32_t f) { return simulationFeatureFlags & f; }
@@ -1287,7 +1611,7 @@ extern "C" {
         return false;
     }
 
-    bool airmodeIsEnabled() {
+    bool isAirmodeEnabled() {
         return false;
     }
 
@@ -1296,6 +1620,10 @@ extern "C" {
     }
 
     uint8_t getCurrentControlRateProfileIndex() {
+        return 0;
+    }
+
+    uint8_t getCurrentBatteryProfileIndex() {
         return 0;
     }
 
@@ -1315,6 +1643,10 @@ extern "C" {
         return simulationBatteryVoltage / simulationBatteryCellCount;
     }
 
+    uint8_t calculateBatteryPercentageRemaining(void) {
+        return simulationBatteryPercentage;
+    }
+
     int32_t getAmperage() {
         return simulationBatteryAmperage;
     }
@@ -1323,7 +1655,15 @@ extern "C" {
         return simulationMahDrawn;
     }
 
+    float getWhDrawn() {
+        return simulationWhDrawn;
+    }
+
     int32_t getEstimatedAltitudeCm() {
+        return simulationAltitude;
+    }
+
+    int32_t getAltitudeAsl() {
         return simulationAltitude;
     }
 
@@ -1361,7 +1701,7 @@ extern "C" {
 
     uint16_t getCoreTemperatureCelsius(void) { return simulationCoreTemperature; }
 
-    bool isFlipOverAfterCrashActive(void) { return false; }
+    bool isCrashFlipModeActive(void) { return false; }
 
     float pidItermAccelerator(void) { return 1.0; }
     uint8_t getMotorCount(void){ return 4; }

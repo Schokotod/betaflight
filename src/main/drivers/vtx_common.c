@@ -33,7 +33,6 @@
 #include "drivers/vtx_common.h"
 #include "drivers/vtx_table.h"
 
-
 static vtxDevice_t *vtxDevice = NULL;
 static uint8_t selectedBand = 0;
 static uint8_t selectedChannel = 0;
@@ -83,9 +82,12 @@ void vtxCommonSetBandAndChannel(vtxDevice_t *vtxDevice, uint8_t band, uint8_t ch
     if (freq != 0) {
         selectedChannel = channel;
         selectedBand = band;
-        if (vtxTableIsFactoryBand[band - 1]) {
+        bool isSmartAudio = (vtxDevice->vTable->getDeviceType(vtxDevice) == VTXDEV_SMARTAUDIO);
+        bool isFactoryBand = vtxTableIsFactoryBand[band - 1];
+        if (!isSmartAudio || isFactoryBand) {
             vtxDevice->vTable->setBandAndChannel(vtxDevice, band, channel);
-        } else {
+        }
+        if (!isFactoryBand) {
             vtxDevice->vTable->setFrequency(vtxDevice, freq);
         }
     }

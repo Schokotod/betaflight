@@ -20,8 +20,9 @@
 
 #pragma once
 
-#include "rx/crsf_protocol.h"
+#include "common/utils.h"
 
+#include "rx/crsf_protocol.h"
 
 #define CRSF_PORT_OPTIONS       (SERIAL_STOPBITS_1 | SERIAL_PARITY_NO)
 #define CRSF_PORT_MODE          MODE_RXTX
@@ -78,6 +79,10 @@ typedef union crsfFrame_u {
     crsfFrameDef_t frame;
 } crsfFrame_t;
 
+// The structured view must cover the whole frame buffer, so that the payload and CRC of a
+// maximum-length frame are inside the declared array and not just inside the union's bytes.
+STATIC_ASSERT(sizeof(crsfFrameDef_t) == CRSF_FRAME_SIZE_MAX, crsfFrameDef_t_does_not_cover_the_frame);
+
 void crsfRxWriteTelemetryData(const void *data, int len);
 void crsfRxSendTelemetryData(void);
 bool crsfRxIsTelemetryBufEmpty(void); // check this function before using crsfRxWriteTelemetryData()
@@ -87,4 +92,8 @@ struct rxRuntimeState_s;
 bool crsfRxInit(const struct rxConfig_s *initialRxConfig, struct rxRuntimeState_s *rxRuntimeState);
 void crsfRxUpdateBaudrate(uint32_t baudrate);
 bool crsfRxUseNegotiatedBaud(void);
+#if defined(USE_CRSF_V3)
+bool crsfRxIsEventDrivenTelemetry(void);
+#endif
 bool crsfRxIsActive(void);
+void crsfRxBind(void);

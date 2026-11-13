@@ -38,7 +38,7 @@ extern "C" {
     #include "pg/pg_ids.h"
     #include "io/beeper.h"
 
-    boxBitmask_t rcModeActivationMask;
+    extern boxBitmask_t rcModeActivationMask;
     int16_t debug[DEBUG16_VALUE_COUNT];
     uint8_t debugMode = 0;
     uint8_t armingFlags = 0;
@@ -245,7 +245,7 @@ extern "C" {
     void rxPwmInit(const rxConfig_t *, rxRuntimeState_t *) {}
     void setArmingDisabled(armingDisableFlags_e flag) { UNUSED(flag); }
     void unsetArmingDisabled(armingDisableFlags_e flag) { UNUSED(flag); }
-    bool taskUpdateRxMainInProgress() { return true; }
+    bool taskUpdateRxMainInProgress(void) { return true; }
     float pt1FilterGain(float f_cut, float dT)
     {
         UNUSED(f_cut);
@@ -254,6 +254,12 @@ extern "C" {
     }
 
     void pt1FilterInit(pt1Filter_t *filter, float k)
+    {
+        UNUSED(filter);
+        UNUSED(k);
+    }
+
+    void pt1FilterUpdateCutoff(pt1Filter_t *filter, float k)
     {
         UNUSED(filter);
         UNUSED(k);

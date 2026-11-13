@@ -14,6 +14,7 @@
  * You should have received a copy of the GNU General Public License
  * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <math.h>
 #include <stdint.h>
 
 extern "C" {
@@ -46,7 +47,7 @@ typedef struct bmp388_calib_param_s {
     int8_t P11;
 } __attribute__((packed)) bmp388_calib_param_t; // packed as we read directly from the device into this structure.
 
-bmp388_calib_param_t bmp388_cal;
+extern bmp388_calib_param_t bmp388_cal;
 
 } // extern "C"
 
@@ -135,7 +136,28 @@ TEST(baroBmp388Test, TestBmp388CalculateWithSampleCalibration)
     EXPECT_NE(0, t_lin);
 
     // and
-    EXPECT_EQ(39535, pressure); // 39535 Pa
+    EXPECT_EQ(101211, pressure); // 101211.28 Pa, truncated to whole Pa
+}
+
+TEST(baroBmp388Test, TestBmp388PressureDropUsesPascalScale)
+{
+    int32_t groundPressure, lowerPressure;
+    baroBmp388ConfigureSampleCalibration();
+    bmp388_ut = 9937920;
+    t_lin = 0;
+
+    bmp388_up = 7323488;
+    bmp388Calculate(&groundPressure, nullptr);
+
+    bmp388_up = 7386830;
+    bmp388Calculate(&lowerPressure, nullptr);
+
+    EXPECT_EQ(101211, groundPressure);
+    EXPECT_EQ(100211, lowerPressure);
+
+    const float groundAltitudeCm = (1.0f - powf(groundPressure / 101325.0f, 0.190295f)) * 4433000.0f;
+    const float lowerAltitudeCm = (1.0f - powf(lowerPressure / 101325.0f, 0.190295f)) * 4433000.0f;
+    EXPECT_NEAR(8366.5f, lowerAltitudeCm - groundAltitudeCm, 1.0f);
 }
 
 // STUBS
@@ -151,39 +173,49 @@ bool busWriteRegister(const extDevice_t*, uint8_t, uint8_t) {return true;}
 bool busWriteRegisterStart(const extDevice_t*, uint8_t, uint8_t) {return true;}
 void busDeviceRegister(const extDevice_t*) {}
 
-uint16_t spiCalculateDivider() {
+uint16_t spiCalculateDivider()
+{
     return 2;
 }
 
-void spiSetClkDivisor() {
+void spiSetClkDivisor()
+{
 }
 
-void spiPreinitByIO(IO_t) {
+void ioPreinitByIO()
+{
 }
 
-void IOConfigGPIO() {
+void IOConfigGPIO()
+{
 }
 
-void IOHi() {
+void IOHi()
+{
 }
 
-IO_t IOGetByTag(ioTag_t) {
+IO_t IOGetByTag(ioTag_t)
+{
     return IO_NONE;
 }
 
-void IOInit() {
+void IOInit()
+{
 }
 
-void EXTIHandlerInit(extiCallbackRec_t *, extiHandlerCallback *) {
+void EXTIHandlerInit(extiCallbackRec_t *, extiHandlerCallback *)
+{
 }
 
-void EXTIConfig(IO_t, extiCallbackRec_t *, int, ioConfig_t, extiTrigger_t) {
+void EXTIConfig(IO_t, extiCallbackRec_t *, int, ioConfig_t, extiTrigger_t)
+{
 }
 
-void EXTIEnable(IO_t) {
-}
-void EXTIDisable(IO_t) {
-}
+void EXTIEnable(IO_t)
+{}
+
+void EXTIDisable(IO_t)
+{}
 
 
 } // extern "C"

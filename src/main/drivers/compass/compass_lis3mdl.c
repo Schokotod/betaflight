@@ -31,6 +31,8 @@
 #include "drivers/time.h"
 #include "common/axis.h"
 
+#include "compass_lis3mdl.h"
+
 #define LIS3MDL_MAG_I2C_ADDRESS     0x1E
 #define LIS3MDL_DEVICE_ID           0x3D
 
@@ -109,9 +111,9 @@ static bool lis3mdlRead(magDev_t * mag, int16_t *magData)
     extDevice_t *dev = &mag->dev;
 
     if (pendingRead) {
-        busReadRegisterBufferStart(dev, LIS3MDL_REG_OUT_X_L, buf, sizeof(buf));
-
-        pendingRead = false;
+        if (busReadRegisterBufferStart(dev, LIS3MDL_REG_OUT_X_L, buf, sizeof(buf))) {
+            pendingRead = false;
+        }
         return false;
     }
 
@@ -137,7 +139,7 @@ static bool lis3mdlInit(magDev_t *mag)
     busWriteRegister(dev, LIS3MDL_REG_CTRL_REG3, 0x00);
 
     delay(100);
-
+    mag->magOdrHz = 80; // LIS3MDL_DO_80
     return true;
 }
 

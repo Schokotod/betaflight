@@ -22,19 +22,20 @@
 
 #include "platform.h"
 
-#include "sensors/acceleration.h"
+#include "common/axis.h"
+#include "common/filter.h"
 
+#include "sensors/acceleration.h"
+#include "sensors/sensors.h"
 
 typedef struct accelerationRuntime_s {
     uint16_t accLpfCutHz;
-    biquadFilter_t accFilter[XYZ_AXIS_COUNT];
+    pt2Filter_t accFilter[XYZ_AXIS_COUNT];
     flightDynamicsTrims_t *accelerationTrims;
-    int accumulatedMeasurementCount;
-    float accumulatedMeasurements[XYZ_AXIS_COUNT];
     uint16_t calibratingA;      // the calibration is done is the main loop. Calibrating decreases at each cycle down to 0, then we enter in a normal mode.
 } accelerationRuntime_t;
 
 extern accelerationRuntime_t accelerationRuntime;
 
-void performAcclerationCalibration(rollAndPitchTrims_t *rollAndPitchTrims);
+void performAccelerometerCalibration(rollAndPitchTrims_t *rollAndPitchTrims);
 void performInflightAccelerationCalibration(rollAndPitchTrims_t *rollAndPitchTrims);

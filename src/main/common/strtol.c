@@ -19,7 +19,6 @@
 
  */
 
-
 #include <ctype.h>
 #include <limits.h>
 
@@ -27,9 +26,12 @@
 
 #include "common/utils.h"
 
+#include "strtol.h"
+
 #define _STRTO_ENDPTR 1
 
-unsigned long _strto_l(const char * str, char ** endptr, int base, int sflag)
+#if PLATFORM_NO_LIBC
+static unsigned long _strto_l(const char * str, char ** endptr, int base, int sflag)
 {
     unsigned long number, cutoff;
 #if _STRTO_ENDPTR
@@ -50,13 +52,13 @@ unsigned long _strto_l(const char * str, char ** endptr, int base, int sflag)
     negative = 0;
     switch (*str) {
         case '-':
-            negative = 1;	/* Fall through to increment str. */
+            negative = 1; /* Fall through to increment str. */
             FALLTHROUGH;
         case '+':
             ++str;
     }
 
-    if (!base || base == 16 || base == 2) {		/* Either dynamic (base = 0) or base with 0[xb] prefix. */
+    if (!base || base == 16 || base == 2) {       /* Either dynamic (base = 0) or base with 0[xb] prefix. */
         if (*str == '0') {
             SET_FAIL(++str);
             if ((!base || base == 16) && tolower(*str) == 'x') {
@@ -131,3 +133,4 @@ int atoi(const char *str)
 {
     return strtol(str, NULL, 10);
 }
+#endif

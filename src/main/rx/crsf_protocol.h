@@ -27,16 +27,33 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Rev7 CRSF docs: UART runs at 400000 baud, 8N1 at 3.0 to 3.3V level.
+// Rev10 CRSF docs: UART runs at 416666 baud, 8N1 at 3.0 to 3.3V level.
+// Avoid using with ExpressLRS STM32 receivers.
+#ifdef USE_CRSF_OFFICIAL_SPEC
+#define CRSF_BAUDRATE           416666
+#else
 #define CRSF_BAUDRATE           420000
+#endif
 
 enum { CRSF_SYNC_BYTE = 0xC8 };
 
-enum { CRSF_FRAME_SIZE_MAX = 64 }; // 62 bytes frame plus 2 bytes frame header(<length><type>)
-enum { CRSF_PAYLOAD_SIZE_MAX = CRSF_FRAME_SIZE_MAX - 6 };
+enum { CRSF_FRAME_SIZE_MAX = 64 }; // <address><length> plus up to 62 bytes of <type><payload><crc>
+// The payload is what is left of the frame after the address, length, type and CRC bytes:
+// the longest legal frame (length 62) carries 60 bytes of payload.
+enum { CRSF_PAYLOAD_SIZE_MAX = CRSF_FRAME_SIZE_MAX - 4 };
 
 typedef enum {
     CRSF_FRAMETYPE_GPS = 0x02,
+    CRSF_FRAMETYPE_GPS_TIME = 0x03,
+    CRSF_FRAMETYPE_GPS_EXTENDED = 0x06,
+    CRSF_FRAMETYPE_VARIO_SENSOR = 0x07,
     CRSF_FRAMETYPE_BATTERY_SENSOR = 0x08,
+    CRSF_FRAMETYPE_BARO_ALTITUDE = 0x09,
+    CRSF_FRAMETYPE_HEARTBEAT = 0x0B,
+    CRSF_FRAMETYPE_BARO = 0x11,
+    CRSF_FRAMETYPE_MAG = 0x12,
+    CRSF_FRAMETYPE_ACCGYRO = 0x13,    // full resolution IMU frames
     CRSF_FRAMETYPE_LINK_STATISTICS = 0x14,
     CRSF_FRAMETYPE_RC_CHANNELS_PACKED = 0x16,
     CRSF_FRAMETYPE_SUBSET_RC_CHANNELS_PACKED = 0x17,
@@ -59,7 +76,12 @@ typedef enum {
 } crsfFrameType_e;
 
 enum {
+    CRSF_COMMAND_SUBCMD_RX = 0x10,    // receiver command
     CRSF_COMMAND_SUBCMD_GENERAL = 0x0A,    // general command
+};
+
+enum {
+    CRSF_COMMAND_SUBCMD_RX_BIND = 0x01,    // bind command
 };
 
 enum {
@@ -82,11 +104,20 @@ enum {
 
 enum {
     CRSF_FRAME_GPS_PAYLOAD_SIZE = 15,
+    CRSF_FRAME_GPS_TIME_PAYLOAD_SIZE = 9,
+    CRSF_FRAME_GPS_EXTENDED_PAYLOAD_SIZE = 20,
+    CRSF_FRAME_VARIO_SENSOR_PAYLOAD_SIZE = 2,
     CRSF_FRAME_BATTERY_SENSOR_PAYLOAD_SIZE = 8,
+    CRSF_FRAME_BARO_ALTITUDE_PAYLOAD_SIZE = 3,
+    CRSF_FRAME_HEARTBEAT_PAYLOAD_SIZE = 2,
     CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE = 10,
     CRSF_FRAME_LINK_STATISTICS_TX_PAYLOAD_SIZE = 6,
     CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE = 22, // 11 bits per channel * 16 channels = 22 bytes.
     CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE = 6,
+    CRSF_FRAME_DEVICE_PING_PAYLOAD_SIZE = 2,
+    CRSF_FRAME_BARO_PAYLOAD_SIZE = 8,
+    CRSF_FRAME_MAG_PAYLOAD_SIZE = 6,
+    CRSF_FRAME_ACCGYRO_PAYLOAD_SIZE = 18,
 };
 
 enum {

@@ -38,30 +38,7 @@
 #define REQUIRE_PRINTF_LONG_SUPPORT
 #endif
 
-// MCU type IDs.
-// IDs are permanent as they have a dependency to configurator through MSP reporting
+// Legacy MSP MCU-type byte value: the configurator reads the MCU name from the CLI "env" command instead.
+#define MCU_TYPE_ID_PROVIDED_BY_NAME 254
 
-typedef enum {
-    MCU_TYPE_SIMULATOR = 0,
-    MCU_TYPE_F103,
-    MCU_TYPE_F303,
-    MCU_TYPE_F40X,
-    MCU_TYPE_F411,
-    MCU_TYPE_F446,
-    MCU_TYPE_F722,
-    MCU_TYPE_F745,
-    MCU_TYPE_F746,
-    MCU_TYPE_F765,
-    MCU_TYPE_H750,
-    MCU_TYPE_H743_REV_UNKNOWN,
-    MCU_TYPE_H743_REV_Y,
-    MCU_TYPE_H743_REV_X,
-    MCU_TYPE_H743_REV_V,
-    MCU_TYPE_H7A3,
-    MCU_TYPE_H723_725,
-    MCU_TYPE_G474,
-    MCU_TYPE_H730,
-    MCU_TYPE_UNKNOWN = 255,
-} mcuTypeId_e;
-
-mcuTypeId_e getMcuTypeId(void);
+const char *getMcuTypeName(void);

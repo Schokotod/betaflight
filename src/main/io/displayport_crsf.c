@@ -35,6 +35,7 @@
 #include "drivers/time.h"
 
 #include "displayport_crsf.h"
+#include "fc/runtime_config.h"
 
 #define CRSF_DISPLAY_PORT_OPEN_DELAY_MS     400
 #define CRSF_DISPLAY_PORT_CLEAR_DELAY_MS    45
@@ -77,7 +78,6 @@ static int crsfScreenSize(const displayPort_t *displayPort)
     return displayPort->rows * displayPort->cols;
 }
 
-
 static int crsfWriteString(displayPort_t *displayPort, uint8_t col, uint8_t row, uint8_t attr, const char *s)
 {
     UNUSED(displayPort);
@@ -85,7 +85,7 @@ static int crsfWriteString(displayPort_t *displayPort, uint8_t col, uint8_t row,
     if (row >= crsfScreen.rows || col >= crsfScreen.cols) {
         return 0;
     }
-    const size_t truncLen = MIN((int)strlen(s), crsfScreen.cols-col);  // truncate at colCount
+    const size_t truncLen = MIN(strlen(s), (size_t)(crsfScreen.cols - col));  // truncate at colCount
     char *rowStart = &crsfScreen.buffer[row * crsfScreen.cols + col];
     crsfScreen.updated |= memcmp(rowStart, s, truncLen);
     if (crsfScreen.updated) {
@@ -96,7 +96,7 @@ static int crsfWriteString(displayPort_t *displayPort, uint8_t col, uint8_t row,
 
 static int crsfWriteChar(displayPort_t *displayPort, uint8_t col, uint8_t row, uint8_t attr, uint8_t c)
 {
-    char s[1];
+    char s[2];
     tfp_sprintf(s, "%c", c);
     return crsfWriteString(displayPort, col, row, attr, s);
 }
@@ -156,6 +156,11 @@ crsfDisplayPortScreen_t *crsfDisplayPortScreen(void)
 
 void crsfDisplayPortMenuOpen(void)
 {
+    if (ARMING_FLAG(ARMED)) {
+        // when armed, make it impossible to open the menu (it wouldn't be possible to disarm)
+        return;
+    }
+
     if (cmsInMenu) {
         return;
     }
@@ -200,10 +205,12 @@ bool crsfDisplayPortIsReady(void)
     return (bool)(delayExpired && cmsReady);
 }
 
-static displayPort_t *displayPortCrsfInit()
+static displayPort_t *displayPortCrsfInit(void)
 {
     crsfDisplayPortSetDimensions(CRSF_DISPLAY_PORT_ROWS_MAX, CRSF_DISPLAY_PORT_COLS_MAX);
     displayInit(&crsfDisplayPort, &crsfDisplayPortVTable, DISPLAYPORT_DEVICE_TYPE_CRSF);
+
+    crsfRedraw(&crsfDisplayPort);
 
     return &crsfDisplayPort;
 }

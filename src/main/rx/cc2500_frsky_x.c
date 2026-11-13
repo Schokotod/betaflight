@@ -34,7 +34,6 @@
 
 #include "drivers/adc.h"
 #include "drivers/io.h"
-#include "drivers/io_def.h"
 #include "drivers/io_types.h"
 #include "drivers/resource.h"
 #include "drivers/rx/rx_cc2500.h"
@@ -134,14 +133,16 @@ static uint8_t remoteToProcessIndex = 0;
 static uint8_t packetLength;
 static uint16_t telemetryDelayUs;
 
-static uint16_t crcTable(uint8_t val) {
+static uint16_t crcTable(uint8_t val)
+{
     uint16_t word;
     word = (*(&crcTable_Short[val & 0x0f]));
     val /= 16;
     return word ^ (0x1081 * val);
 }
 
-static uint16_t calculateCrc(const uint8_t *data, uint8_t len) {
+static uint16_t calculateCrc(const uint8_t *data, uint8_t len)
+{
     uint16_t crc = 0;
     for (unsigned i = 0; i < len; i++) {
         crc = (crc << 8) ^ crcTable((uint8_t)(crc >> 8) ^ *data++);
@@ -190,7 +191,7 @@ static void buildTelemetryFrame(uint8_t *packet)
         uint8_t a1Value;
         switch (rxCc2500SpiConfig()->a1Source) {
         case FRSKY_SPI_A1_SOURCE_EXTADC:
-            a1Value = (uint8_t)((adcGetChannel(ADC_EXTERNAL1) & 0xfe0) >> 5);
+            a1Value = (uint8_t)((adcGetValue(ADC_EXTERNAL1) & 0xfe0) >> 5);
             break;
         case FRSKY_SPI_A1_SOURCE_CONST:
             a1Value = A1_CONST_X & 0x7f;
@@ -225,9 +226,10 @@ static void buildTelemetryFrame(uint8_t *packet)
                 outFrameMarker->raw = responseToSend.raw & SEQUENCE_MARKER_REMOTE_PART;
                 outFrameMarker->data.packetSequenceId = localPacketId;
 
+#if defined(USE_TELEMETRY_SMARTPORT)
                 frame[6] = appendSmartPortData(&frame[7]);
                 memcpy(&telemetryTxBuffer[localPacketId], &frame[6], TELEMETRY_FRAME_SIZE);
-
+#endif
                 localPacketId = (localPacketId + 1) % TELEMETRY_SEQUENCE_LENGTH;
             }
         }
@@ -238,13 +240,16 @@ static void buildTelemetryFrame(uint8_t *packet)
     frame[14]=lcrc;
 }
 
+#if defined(USE_TELEMETRY_SMARTPORT)
 static bool frSkyXReadyToSend(void)
 {
     return true;
 }
+#endif
 
 #if defined(USE_TELEMETRY_SMARTPORT)
-static void frSkyXTelemetrySendByte(uint8_t c) {
+static void frSkyXTelemetrySendByte(uint8_t c)
+{
     if (c == FSSP_DLE || c == FSSP_START_STOP) {
         telemetryOutBuffer[telemetryOutWriter] = FSSP_DLE;
         telemetryOutWriter = (telemetryOutWriter + 1) % TELEMETRY_OUT_BUFFER_SIZE;
@@ -270,7 +275,6 @@ static void frSkyXTelemetryWriteFrame(const smartPortPayload_t *payload)
 #endif
 #endif // USE_RX_FRSKY_SPI_TELEMETRY
 
-
 void frSkyXSetRcData(uint16_t *rcData, const uint8_t *packet)
 {
     uint16_t c[8];
@@ -294,7 +298,7 @@ void frSkyXSetRcData(uint16_t *rcData, const uint8_t *packet)
     }
 }
 
-bool isValidPacket(const uint8_t *packet)
+static bool isValidPacket(const uint8_t *packet)
 {
     bool useBindTxId2 = false;
 
@@ -305,7 +309,7 @@ bool isValidPacket(const uint8_t *packet)
         }
     }
 
-    uint16_t lcrc = calculateCrc(&packet[3], (packetLength - 7)); 
+    uint16_t lcrc = calculateCrc(&packet[3], (packetLength - 7));
 
     if ((lcrc >> 8) == packet[packetLength - 4] && (lcrc & 0x00FF) == packet[packetLength - 3] &&
         (packet[0] == packetLength - 3) &&
@@ -433,7 +437,7 @@ rx_spi_received_e frSkyXHandlePacket(uint8_t * const packet, uint8_t * const pro
                 }
                 if (!frameReceived) {
                     packetErrors++;
-                    DEBUG_SET(DEBUG_RX_FRSKY_SPI, DEBUG_DATA_BAD_FRAME, packetErrors);
+                    DEBUG_SET(DEBUG_RX_FRSKY_SPI, DEBUG_DATA_BAD_FRAME, packetErrors);  //!< Packet Errors
                     cc2500Strobe(CC2500_SFRX);
                 }
             }
@@ -474,7 +478,7 @@ rx_spi_received_e frSkyXHandlePacket(uint8_t * const packet, uint8_t * const pro
 
 #if defined(USE_TELEMETRY_SMARTPORT)
             if (telemetryEnabled) {
-                ret |= RX_SPI_ROCESSING_REQUIRED;
+                ret |= RX_SPI_PROCESSING_REQUIRED;
             }
 #endif
             *protocolState = STATE_RESUME;
@@ -505,7 +509,7 @@ rx_spi_received_e frSkyXHandlePacket(uint8_t * const packet, uint8_t * const pro
                 break;
             }
             missingPackets++;
-            DEBUG_SET(DEBUG_RX_FRSKY_SPI, DEBUG_DATA_MISSING_PACKETS, missingPackets);
+            DEBUG_SET(DEBUG_RX_FRSKY_SPI, DEBUG_DATA_MISSING_PACKETS, missingPackets);  //!< Missing Packets
             *protocolState = STATE_DATA;
         }
         break;

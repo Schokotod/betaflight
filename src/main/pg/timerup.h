@@ -27,11 +27,16 @@
 #include "drivers/io.h"
 #include "drivers/timer.h" // For HARDWARE_TIMER_DEFINITION_COUNT
 
-#ifdef USE_TIMER_MGMT
+#if defined(USE_TIMER_MGMT) && defined(USE_TIMER_UP_CONFIG)
+
+#if defined(USED_TIMERS) && defined(TIMUP_TIMERS)
+    STATIC_ASSERT((~USED_TIMERS  & TIMUP_TIMERS) == 0, "All TIMUP timers must be used");
+#endif
 
 typedef struct timerUpConfig_s {
     int8_t dmaopt;
 } timerUpConfig_t;
 
 PG_DECLARE_ARRAY(timerUpConfig_t, HARDWARE_TIMER_DEFINITION_COUNT, timerUpConfig);
+
 #endif

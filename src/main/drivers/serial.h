@@ -23,6 +23,7 @@
 #include "drivers/io.h"
 #include "drivers/io_types.h"
 #include "drivers/resource.h"
+#include "drivers/serial_resource.h"
 
 #include "pg/pg.h"
 
@@ -43,16 +44,28 @@ typedef enum {
     SERIAL_BIDIR         = 1 << 3,
 
     /*
-     * Note on SERIAL_BIDIR_PP
+     * Note on SERIAL_BIDIR_PP *on some MCU families*
      * With SERIAL_BIDIR_PP, the very first start bit of back-to-back bytes
      * is lost and the first data byte will be lost by a framing error.
      * To ensure the first start bit to be sent, prepend a zero byte (0x00)
      * to actual data bytes.
      */
-    SERIAL_BIDIR_OD        = 0 << 4,
-    SERIAL_BIDIR_PP        = 1 << 4,
-    SERIAL_BIDIR_NOPULL    = 1 << 5, // disable pulls in BIDIR RX mode
-    SERIAL_BIDIR_PP_PD     = 1 << 6, // PP mode, normall inverted, but with PullDowns, to fix SA after bidir issue fixed (#10220)
+    // output configuration in BIDIR non-inverted mode
+    // pushpull is used in UNIDIR or inverted mode by default
+    // SERIAL_BIDIR must be specified explicitly
+    SERIAL_BIDIR_OD        = 0 << 4, // default in BIDIR non-inverted mode
+    SERIAL_BIDIR_PP        = 1 << 4, // force pushpull
+
+    SERIAL_PULL_DEFAULT    = 0 << 5, // pulldown in inverted mode, pullup otherwise
+    SERIAL_PULL_NONE       = 1 << 5, // disable pulls in RX or opendrain TX mode
+    // option for Smartaudio serial port - line is in MARK state when idle - break condition.
+    // DO NOT USE unless absolutely necessary
+    // SERIAL_PULL_NONE has precedence
+    SERIAL_PULL_SMARTAUDIO = 1 << 6, // set PULLDOWN on RX, even when not inverted.
+
+    // If this option is set then switch the TX line to input when not in use to detect it being pulled low
+    // (and prevent powering external device by TX pin)
+    SERIAL_CHECK_TX        = 1 << 7,
 } portOptions_e;
 
 // Define known line control states which may be passed up by underlying serial driver callback
@@ -60,7 +73,7 @@ typedef enum {
 #define CTRL_LINE_STATE_RTS (1 << 1)
 
 typedef void (*serialReceiveCallbackPtr)(uint16_t data, void *rxCallbackData);   // used by serial drivers to return frames to app
-typedef void (*serialIdleCallbackPtr)();
+typedef void (*serialIdleCallbackPtr)(void);
 
 typedef struct serialPort_s {
 
@@ -75,33 +88,24 @@ typedef struct serialPort_s {
     uint32_t txBufferSize;
     volatile uint8_t *rxBuffer;
     volatile uint8_t *txBuffer;
-    uint32_t rxBufferHead;
-    uint32_t rxBufferTail;
-    uint32_t txBufferHead;
-    uint32_t txBufferTail;
-
+    volatile uint32_t rxBufferHead;
+    volatile uint32_t rxBufferTail;
+    volatile uint32_t txBufferHead;
+    volatile uint32_t txBufferTail;
     serialReceiveCallbackPtr rxCallback;
     void *rxCallbackData;
 
     serialIdleCallbackPtr idleCallback;
 
-    uint8_t identifier;
+    int8_t identifier;  // actually serialPortIdentifier_e; avoid circular header dependency
 } serialPort_t;
 
-#if defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL2)
-# ifdef USE_SOFTSERIAL2
-#  define SERIAL_PORT_MAX_INDEX (RESOURCE_SOFT_OFFSET + 2)
-# else
-#  define SERIAL_PORT_MAX_INDEX (RESOURCE_SOFT_OFFSET + 1)
-# endif
-#else
-# define SERIAL_PORT_MAX_INDEX RESOURCE_SOFT_OFFSET
-#endif
-
 typedef struct serialPinConfig_s {
-    ioTag_t ioTagTx[SERIAL_PORT_MAX_INDEX];
-    ioTag_t ioTagRx[SERIAL_PORT_MAX_INDEX];
-    ioTag_t ioTagInverter[SERIAL_PORT_MAX_INDEX];
+    ioTag_t ioTagTx[RESOURCE_SERIAL_COUNT];
+    ioTag_t ioTagRx[RESOURCE_SERIAL_COUNT];
+#ifdef USE_INVERTER
+    ioTag_t ioTagInverter[RESOURCE_UART_COUNT]; // this array is only for UARTs.
+#endif
 } serialPinConfig_t;
 
 PG_DECLARE(serialPinConfig_t, serialPinConfig);
@@ -120,6 +124,9 @@ struct serialPortVTable {
     bool (*isSerialTransmitBufferEmpty)(const serialPort_t *instance);
 
     void (*setMode)(serialPort_t *instance, portMode_e mode);
+#ifdef USE_PLATFORM_UART_IDLE_CALLBACK
+    void (*setIdleCallback)(serialPort_t *instance, serialIdleCallbackPtr callback);
+#endif
     void (*setCtrlLineStateCb)(serialPort_t *instance, void (*cb)(void *instance, uint16_t ctrlLineState), void *context);
     void (*setBaudRateCb)(serialPort_t *instance, void (*cb)(serialPort_t *context, uint32_t baud), serialPort_t *context);
 
@@ -130,12 +137,15 @@ struct serialPortVTable {
 };
 
 void serialWrite(serialPort_t *instance, uint8_t ch);
+// prefer snapshotting the returned value to calling this function in while loops
 uint32_t serialRxBytesWaiting(const serialPort_t *instance);
 uint32_t serialTxBytesFree(const serialPort_t *instance);
 void serialWriteBuf(serialPort_t *instance, const uint8_t *data, int count);
+void serialWriteBufNoFlush(serialPort_t *instance, const uint8_t *data, int count);
 uint8_t serialRead(serialPort_t *instance);
 void serialSetBaudRate(serialPort_t *instance, uint32_t baudRate);
 void serialSetMode(serialPort_t *instance, portMode_e mode);
+void serialSetIdleCallback(serialPort_t *instance, serialIdleCallbackPtr callback);
 void serialSetCtrlLineStateCb(serialPort_t *instance, void (*cb)(void *context, uint16_t ctrlLineState), void *context);
 void serialSetBaudRateCb(serialPort_t *instance, void (*cb)(serialPort_t *context, uint32_t baud), serialPort_t *context);
 bool isSerialTransmitBufferEmpty(const serialPort_t *instance);
@@ -144,5 +154,6 @@ uint32_t serialGetBaudRate(serialPort_t *instance);
 
 // A shim that adapts the bufWriter API to the serialWriteBuf() API.
 void serialWriteBufShim(void *instance, const uint8_t *data, int count);
+void serialWriteBufBlockingShim(void *instance, const uint8_t *data, int count);
 void serialBeginWrite(serialPort_t *instance);
 void serialEndWrite(serialPort_t *instance);

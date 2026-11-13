@@ -20,20 +20,24 @@
 
 #pragma once
 
+#include "common/axis.h"
 #include "common/time.h"
-#include "pg/pg.h"
+#include "common/vector.h"
+
 #include "drivers/accgyro/accgyro.h"
+
+#include "pg/pg.h"
+
 #include "sensors/sensors.h"
 
+#define ACC_TRIM_MAX 300
+
 // Type of accelerometer used/detected
+// Acc hardware types were updated in PR #14087 (removed ACC_ADXL345, ACC_MMA8452, ACC_BMA280, ACC_LSM303DLHC)
 typedef enum {
     ACC_DEFAULT,
     ACC_NONE,
-    ACC_ADXL345,
     ACC_MPU6050,
-    ACC_MMA8452,
-    ACC_BMA280,
-    ACC_LSM303DLHC,
     ACC_MPU6000,
     ACC_MPU6500,
     ACC_MPU9250,
@@ -47,13 +51,29 @@ typedef enum {
     ACC_BMI160,
     ACC_BMI270,
     ACC_LSM6DSO,
-    ACC_FAKE
+    ACC_LSM6DSV16X,
+    ACC_IIM42653,
+    ACC_ICM45605,
+    ACC_ICM45686,
+    ACC_ICM40609D,
+    ACC_IIM42652,
+    ACC_LSM6DSK320X,
+    ACC_ICM42622P,
+    ACC_ICM42686P,
+    ACC_ICM56686,
+    ACC_BMI423,
+    ACC_VIRTUAL,
+    ACC_LSM6DSV32X,
+    ACC_HARDWARE_COUNT
 } accelerationSensor_e;
 
 typedef struct acc_s {
     accDev_t dev;
     uint16_t sampleRateHz;
-    float accADC[XYZ_AXIS_COUNT];
+    vector3_t accADC;                       // rotated but unscaled ADC value
+    vector3_t jerk;
+    float accMagnitude;                     // in multiples of 1G
+    float jerkMagnitude;                    // in multiples of 1G/s (measure of collision strength)
     bool isAccelUpdatedAtLeastOnce;
 } acc_t;
 
@@ -65,13 +85,13 @@ typedef struct rollAndPitchTrims_s {
 } rollAndPitchTrims_t_def;
 
 typedef union rollAndPitchTrims_u {
-    int16_t raw[2];
+    int16_t raw[RP_AXIS_COUNT];
     rollAndPitchTrims_t_def values;
 } rollAndPitchTrims_t;
 
 #if defined(USE_ACC)
 typedef struct accelerometerConfig_s {
-    uint16_t acc_lpf_hz;                    // cutoff frequency for the low pass filter used on the acc z-axis for althold in Hz
+    uint16_t acc_lpf_hz;                    // cutoff frequency for attitude anti-aliasing filter
     uint8_t acc_hardware;                   // Which acc hardware to use on boards with more than one device
     bool acc_high_fsr;
     flightDynamicsTrims_t accZero;
@@ -86,9 +106,13 @@ bool accIsCalibrationComplete(void);
 bool accHasBeenCalibrated(void);
 void accStartCalibration(void);
 void resetRollAndPitchTrims(rollAndPitchTrims_t *rollAndPitchTrims);
-void accUpdate(timeUs_t currentTimeUs, rollAndPitchTrims_t *rollAndPitchTrims);
-bool accGetAccumulationAverage(float *accumulation);
+void accUpdate(timeUs_t currentTimeUs);
 union flightDynamicsTrims_u;
 void setAccelerationTrims(union flightDynamicsTrims_u *accelerationTrimsToUse);
 void accInitFilters(void);
 void applyAccelerometerTrimsDelta(union rollAndPitchTrims_u *rollAndPitchTrimsDelta);
+#ifdef USE_CRSF_ACCGYRO_TELEMETRY
+bool accelHasDownsampledData(void);
+float accelGetDownsampled(int axis);
+bool accelStartDownsampledCycle(void);
+#endif

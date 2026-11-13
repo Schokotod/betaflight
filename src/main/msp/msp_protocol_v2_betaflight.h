@@ -24,3 +24,32 @@
 #define MSP2_SEND_DSHOT_COMMAND             0x3003
 #define MSP2_GET_VTX_DEVICE_STATUS          0x3004
 #define MSP2_GET_OSD_WARNINGS               0x3005  // returns active OSD warning message text
+#define MSP2_GET_TEXT                       0x3006
+#define MSP2_SET_TEXT                       0x3007
+#define MSP2_GET_LED_STRIP_CONFIG_VALUES    0x3008
+#define MSP2_SET_LED_STRIP_CONFIG_VALUES    0x3009
+#define MSP2_SENSOR_CONFIG_ACTIVE           0x300A
+#define MSP2_SENSOR_OPTICALFLOW             0x300B
+#define MSP2_MCU_INFO                       0x300C
+#define MSP2_GYRO_SENSOR_ACTIVE             0x300D
+#define MSP2_BATTERY_PROFILE                0x300E
+#define MSP2_SET_BATTERY_PROFILE            0x300F
+#define MSP2_CLI_SETTING                    0x3010
+#define MSP2_CLI_SETTING_INFO               0x3011
+#define MSP2_CLI_COMMAND                    0x3012
+
+// MSP2_CLI_COMMAND response flags (byte following the u16 total-length header)
+#define MSP2_CLI_COMMAND_FLAG_TRUNCATED     (1 << 0) // output exceeded the pageable buffer
+#define MSP2_CLI_COMMAND_FLAG_REFUSED       (1 << 1) // command refused or paging session mismatch
+
+// MSP2_SET_TEXT and MSP2_GET_TEXT variable types
+#define MSP2TEXT_PILOT_NAME                      1
+#define MSP2TEXT_CRAFT_NAME                      2
+#define MSP2TEXT_PID_PROFILE_NAME                3
+#define MSP2TEXT_RATE_PROFILE_NAME               4
+#define MSP2TEXT_BUILDKEY                        5
+#define MSP2TEXT_RELEASENAME                     6
+#define MSP2TEXT_CUSTOM_MSG_0                    7  // CUSTOM_MSG_MAX_NUM  entries are allocated
+#define CUSTOM_MSG_MAX_NUM                       4
+#define MSP2TEXT_BATTERY_PROFILE_NAME        11
+// next new variable type must be >= MSP2TEXT_BATTERY_PROFILE_NAME + 1 (12)
